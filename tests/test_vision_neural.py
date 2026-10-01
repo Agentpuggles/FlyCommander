@@ -561,7 +561,7 @@ def test_recognizer_without_index_reports_detection_only(library):
     assert analysis.cards[0].match.unknown is True
 
 
-def test_recognizer_stabilises_identity_across_frames(small_index, library):
+def test_recognizer_stabilises_identity_across_frames(small_index, library, monkeypatch):
     from physical.vision_pipeline import CardRecognizer, RecognitionConfig
 
     index, embedder = small_index
@@ -570,6 +570,14 @@ def test_recognizer_stabilises_identity_across_frames(small_index, library):
     recognizer = CardRecognizer(RecognitionConfig(index_dir=str(Path(tempfile.mkdtemp()) / "x")),
                                 embedder=embedder)
     recognizer.matcher = CardMatcher(index, embedder=embedder)
+    # Stabilisation is independent of detector/matcher accuracy. An unknown
+    # neighbour repeated four times must NOT turn into a stable identity.
+    # Supply one positively verified match rather than relying on that old bug.
+    from vision.matcher import MatchResult, MatchCandidate
+    entry = index.entries[0]
+    monkeypatch.setattr(recognizer.matcher, "match_rectified", lambda rect: MatchResult(
+        candidates=[MatchCandidate(entry.set_code, entry.collector_number,
+                                   entry.name, .95)], unknown=False))
     first = recognizer.recognize(scene.image)
     track = first.cards[0].track_id
     for _ in range(3):

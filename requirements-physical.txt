@@ -1,0 +1,5 @@
+# Camera + reference-art scanner, including optional OCR rescue.
+-r requirements.txt
+opencv-python-headless>=4.9,<5.1
+pytesseract>=0.3.10
+# OCR additionally needs the OS package tesseract-ocr; artwork matching does not.

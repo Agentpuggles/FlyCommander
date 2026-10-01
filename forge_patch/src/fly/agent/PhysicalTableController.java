@@ -4,53 +4,51 @@ import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
+import forge.game.combat.Combat;
+import java.util.*;
 
-import java.util.List;
-
-/**
- * The human's seat, driven by the physical table instead of by Forge's AI.
- *
- * The player's real board is observed by FlyCommander's vision pipeline and
- * posted to {@link AgentServer} as table actions. This controller is the point
- * where those actions enter the game: at every priority it drains the queue
- * (game thread, so no HTTP thread ever touches game state) and then **passes**
- * — it never plays a card on its own. Everything the seat does was done by the
- * human's hands on the table.
- *
- * Forge stays the rules engine: it validates each move (an illegal one is
- * rejected with a reason the physical table records), owns the stack, and
- * resolves combat. The AI seats opposite play their own game normally.
+/** Experimental assisted seat, NOT a full human controller.
+ * Only stock-AI prepared plays are offered. All micro choices remain stock AI.
+ * Approval precedes playChosenSpellAbility; no scanner mutation is consumed.
  */
 public class PhysicalTableController extends PlayerControllerAi {
-
     private final Player me;
-
-    public PhysicalTableController(Game game, Player player,
-                                   forge.LobbyPlayer lobbyPlayer) {
+    public PhysicalTableController(Game game, Player player, forge.LobbyPlayer lobbyPlayer) {
         super(game, player, lobbyPlayer);
-        this.me = player;
-        try {
-            getAi().setUseSimulation(null);
-        } catch (Throwable ignored) {
-            // keep default behavior if the option API shifts
+        me = player;
+        getAi().setUseSimulation(null);
+    }
+    private String ask(String kind, String text, List<String> choices) {
+        String choice = HumanDecisionChannel.ask(TableSnapshot.capture(getGame(), me), kind, text, choices);
+        System.out.println("[Human " + kind + "] " + choice);
+        return choice;
+    }
+    @Override public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn) {
+        return ask("mulligan", "Keep this Forge hand? AI chooses any cards returned to the library (" + cardsToReturn + ").",
+                List.of("Keep", "Mulligan")).equals("Keep");
+    }
+    @Override public List<SpellAbility> chooseSpellAbilityToPlay() {
+        List<SpellAbility> proposed = super.chooseSpellAbilityToPlay();
+        if (proposed == null) proposed = List.of();
+        StringBuilder preview = new StringBuilder();
+        for (SpellAbility sa : proposed) {
+            preview.append(sa.isLandAbility() ? "Play land: " : sa.isSpell() ? "Cast: " : "Activate: ");
+            preview.append(sa.getHostCard().getName()).append(" — ").append(sa.toString());
+            for (SpellAbility sub = sa; sub != null; sub = sub.getSubAbility())
+                if (sub.usesTargeting()) preview.append(" Targets: ").append(sub.getTargets());
+            preview.append("\n");
         }
+        List<String> choices = proposed.isEmpty() ? List.of("Pass priority") : List.of("Approve AI proposal", "Pass priority");
+        String choice = ask("priority", proposed.isEmpty() ? "No AI-proposed play. This does not mean no legal plays exist." : preview.toString(), choices);
+        return choice.equals("Approve AI proposal") ? proposed : List.of();
     }
-
-    /** Apply queued physical actions, then pass priority. */
-    @Override
-    public List<SpellAbility> chooseSpellAbilityToPlay() {
-        TableActionApplier.drain(me);
-        return List.of();
+    @Override public void declareAttackers(Player attacker, Combat combat) {
+        ask("combat", "Forge AI will choose your attackers and defenders, including mandatory attacks. Manual combat is not implemented.", List.of("Delegate attacks to AI"));
+        super.declareAttackers(attacker, combat);
     }
-
-    /** Attackers were declared physically (cards turned sideways). */
-    @Override
-    public void declareAttackers(Player attackingPlayer,
-                                 forge.game.combat.Combat combat) {
-        TableActionApplier.drain(me);
+    @Override public void declareBlockers(Player defender, Combat combat) {
+        ask("combat", "Forge AI will choose your blockers. Manual combat is not implemented.", List.of("Delegate blocks to AI"));
+        super.declareBlockers(defender, combat);
     }
-
-    public Player tablePlayer() {
-        return me;
-    }
+    public Player tablePlayer() { return me; }
 }

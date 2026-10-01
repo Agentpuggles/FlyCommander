@@ -12,15 +12,20 @@ import forge.game.player.PlayerController;
  */
 public class FlyLobbyPlayer extends LobbyPlayerAi {
 
-    public FlyLobbyPlayer(String name) {
+    private final String brainUrl;
+
+    public FlyLobbyPlayer(String name) { this(name, null); }
+
+    public FlyLobbyPlayer(String name, String brainUrl) {
         super(name, null);
+        this.brainUrl = brainUrl;
     }
 
     @Override
     public Player createIngamePlayer(Game game, int seat) {
         Player player = new Player(getName(), game, seat);
         PlayerController flyController =
-                new FlyPlayerController(game, player, this);
+                new FlyPlayerController(game, player, this, brainUrl);
         player.setFirstController(flyController);
         return player;
     }

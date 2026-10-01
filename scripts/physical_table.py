@@ -38,6 +38,8 @@ def main() -> int:
                          "recognition index from real card images")
     ap.add_argument("--images", type=int, default=0, metavar="N",
                     help="download at most N card images while building")
+    ap.add_argument("--no-camera", action="store_true",
+                    help="browser-camera/photo mode: do not open a server camera")
     ap.add_argument("--camera-config", default=None,
                     help="path to camera_config.json "
                          "(default: physical/camera_config.json or repo root)")
@@ -52,14 +54,16 @@ def main() -> int:
 
     app = PhysicalTableApp(data_dir=args.data_dir,
                            checkpoint=args.checkpoint,
-                           camera_config=args.camera_config)
-    if args.offline:
-        app.cache.allow_network = False
+                           camera_config=args.camera_config,
+                           allow_network=not args.offline)
 
     if args.build_index or args.sync_scryfall:
         info = app.vision_build_index(synthetic=args.build_index,
                                       sync_scryfall=args.sync_scryfall,
                                       download_images=args.images)
+        if info.get("status") == "error":
+            print(f"[vision] {info['error']}")
+            return 1
         print(f"[vision] index ready: {info['cards']} entries, embedder "
               f"{info['embedder']} (dim {info['dim']})")
         for note in info.get("notes", []):
@@ -67,20 +71,23 @@ def main() -> int:
 
     server = PhysicalTableServer(app, port=args.port, host=args.host)
     server.start()
-    if app.watcher.start():
+    if args.no_camera:
+        print("[physical] browser-camera/photo mode (server camera disabled)")
+    elif app.watcher.start():
         print("[physical] camera watcher running")
     else:
         print("[physical] camera watcher unavailable:", app.watcher.stats["lastError"])
     status = app.recognizer.status()
-    if status["ready"]:
+    if status.get("referenceScanner", {}).get("ready"):
+        print(f"[vision] artwork scanner active — {status['referenceScanner']['references']} reference faces; confirm to add")
+    elif status["ready"]:
         print(f"[vision] neural recognition active — {status['indexSize']} cards "
               f"indexed, detector={status['detector']}, "
               f"embedder={status['embedder']['name']}"
               f"{' (trained)' if status['embedder'].get('trained') else ' (UNTRAINED)'}")
     else:
-        print("[vision] no recognition index yet — run with --build-index 64 "
-              "(demo library) or --sync-scryfall (real cards); the OCR path "
-              "stays available in the meantime")
+        print("[vision] import your deck in the table UI to enable real artwork matching. "
+              "No model training required. OCR/manual entry remain available.")
 
     # Which of the three identification paths can actually answer right now?
     # Say it out loud at startup: "it didn't recognise my card" is otherwise
@@ -96,15 +103,13 @@ def main() -> int:
     if library["real"] == 0 and library["synthetic"] > 0:
         print("[vision]   → the demo library cannot name real cards from pixels; "
               "Scan reads the card's text instead")
-    if not status["embedder"].get("trained"):
-        print("[vision]   → embedder is untrained, so visual matching is weak: "
-              "scripts/train_embedder.py is what buys accuracy")
+    if not status["embedder"].get("trained") and not status.get("referenceScanner", {}).get("ready"):
+        print("[vision]   → experimental neural embedder is untrained. "
+              "Use Import real card images for the training-free artwork scanner.")
     if not (SCAN_AVAILABLE and ocr_ok):
-        print("[vision]   → with no OCR, \"Add by name\" is the way to put a "
-              "card on the table")
+        print("[vision]   → OCR rescue is unavailable; imported artwork or Add by name still work")
     print(f"[physical] Magic Fly table running:  http://127.0.0.1:{args.port}")
-    print("[physical] camera: server-owned MJPEG stream — no browser camera "
-          "permission needed")
+    print("[physical] choose server camera, this device’s browser camera, or upload a photo")
     print("[physical] press 📷 Scan card to identify a card, or type its name "
           "under the video")
     print("[physical] the fly brain panel updates with every decision.")

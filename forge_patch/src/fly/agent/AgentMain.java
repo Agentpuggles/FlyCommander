@@ -35,6 +35,12 @@ public final class AgentMain {
             System.err.println("  deck spec: \"random\", a Forge Commander deck name, or a .dck path");
             System.exit(2);
         }
+        boolean physical = Boolean.getBoolean("fly.agent.physical");
+        boolean table = "1".equals(System.getProperty("fly.agent.table"));
+        if (table && !Boolean.getBoolean("fly.agent.experimentalAssisted"))
+            throw new IllegalArgumentException("Table mode requires -Dfly.agent.experimentalAssisted=true; not a full human controller");
+        if (table && args.length != 5) throw new IllegalArgumentException("Table mode requires exactly three opponents");
+        if (physical && args.length != 5) throw new IllegalArgumentException("Physical pod needs three Fly decks");
         int games = Integer.parseInt(args[0]);
         String flySpec = args[1];
         List<String> aiSpecs = new ArrayList<>();
@@ -84,7 +90,7 @@ public final class AgentMain {
         rules.setAppliedVariants(java.util.EnumSet.of(GameType.Commander));
         rules.setGamesPerMatch(1);
 
-        FlyLobbyPlayer flyLobby = new FlyLobbyPlayer("FlyBrain");
+        forge.LobbyPlayer flyLobby = physical ? new WebHumanLobbyPlayer("Flynn") : table ? new TableLobbyPlayer("Paper human (AI-assisted)") : new FlyLobbyPlayer("FlyBrain");
         RegisteredPlayer flySeat = RegisteredPlayer.forCommander(flyDeck);
         flySeat.setPlayer(flyLobby);
 
@@ -93,8 +99,10 @@ public final class AgentMain {
         aiIndex = 2;
         for (Deck aiDeck : aiDecks) {
             RegisteredPlayer seat = RegisteredPlayer.forCommander(aiDeck);
-            seat.setPlayer(GamePlayerUtil.createAiPlayer(
-                    "Ai(" + aiIndex + ")-" + aiDeck.getName(), aiIndex, ""));
+            int flyNumber = aiIndex - 1;
+            seat.setPlayer(physical ? new FlyLobbyPlayer("Fly #" + flyNumber,
+                    "http://127.0.0.1:" + (Integer.getInteger("fly.agent.brainBasePort", 8792) + flyNumber - 1) + "/decide")
+                    : GamePlayerUtil.createAiPlayer("Ai(" + aiIndex + ")-" + aiDeck.getName(), aiIndex, ""));
             seats.add(seat);
             aiIndex++;
         }
@@ -111,8 +119,21 @@ public final class AgentMain {
             Game game = match.createGame();
             // register the in-game fly Player once created (seat 0)
             registerFlyPlayer(game);
+            if (table) {
+                for (var p : game.getPlayers()) if (p.getLobbyPlayer() instanceof TableLobbyPlayer) {
+                    AgentGameState.register(game, p);
+                    AgentGameState.registerTable(p);
+                }
+            }
+            if (physical) {
+                // Never let Forge deal an invented paper hand. Until the source
+                // draw/library hook is installed this mode is a wiring diagnostic.
+                WebHumanSession.fault("Physical library/draw source hook is not installed. Four seats created; game has NOT started. No paper hand was invented.");
+                new java.util.concurrent.CountDownLatch(1).await();
+            }
             match.startGame(game);
 
+            if (table) HumanDecisionChannel.finish(TableSnapshot.capture(game, AgentGameState.tableSeat()));
             GameEndReason reason = game.getOutcome().getWinCondition();
             boolean flyWon = game.getOutcome().isWinner(flyLobby);
             if (flyWon) flyWins++;

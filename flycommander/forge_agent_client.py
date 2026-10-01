@@ -139,6 +139,7 @@ class FlyBrainServer:
     def stop(self) -> None:
         if self._http is not None:
             self._http.shutdown()
+            self._http.server_close()
             self._http = None
 
     # ------------------------------------------------------------------

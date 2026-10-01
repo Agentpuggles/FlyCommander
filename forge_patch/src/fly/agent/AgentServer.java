@@ -49,6 +49,8 @@ public final class AgentServer {
         server.createContext("/health", AgentServer::handleHealth);
         server.createContext("/observation", AgentServer::handleObservation);
         server.createContext("/result", AgentServer::handleResult);
+        server.createContext("/human/state", ex -> respond(ex, 200, WebHumanSession.active() ? WebHumanSession.snapshotJson() : HumanDecisionChannel.snapshot()));
+        server.createContext("/human/decision", AgentServer::handleHumanDecision);
         server.createContext("/table/events", AgentServer::handleTableEvents);
         server.createContext("/table/state", AgentServer::handleTableState);
         server.createContext("/table/queue", AgentServer::handleTableQueue);
@@ -121,14 +123,8 @@ public final class AgentServer {
             respond(ex, 503, "{\"error\":\"agent booting\"}");
             return;
         }
-        String json;
-        try {
-            json = GameObserver.snapshotJson(AgentGameState.currentGame(),
-                    AgentGameState.flyPlayer());
-        } catch (Throwable t) {
-            json = "{\"error\":\"snapshot failed: "
-                    + sanitize(String.valueOf(t)) + "\"}";
-        }
+        // Never walk live Forge objects from an HTTP worker.
+        String json = lastObservationJson;
         respond(ex, 200, json);
     }
 
@@ -140,58 +136,21 @@ public final class AgentServer {
     // physical table → Forge
     // ------------------------------------------------------------------
     private static void handleTableEvents(HttpExchange ex) throws IOException {
-        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
-            respond(ex, 405, "{\"error\":\"POST required\"}");
-            return;
-        }
-        if (!AgentGameState.hasTableSeat()) {
-            respond(ex, 409, "{\"error\":\"no physical seat in this match\","
-                    + "\"applied\":0,\"rejected\":0}");
-            return;
-        }
-        String body = readBody(ex);
-        java.util.List<TableActionQueue.Action> actions;
-        try {
-            actions = TableActionQueue.parseBatch(body);
-        } catch (Throwable t) {
-            respond(ex, 400, "{\"error\":\"bad batch: "
-                    + sanitize(String.valueOf(t)) + "\"}");
-            return;
-        }
-        int accepted = 0, duplicates = 0;
-        for (TableActionQueue.Action a : actions) {
-            if (TableActionQueue.offer(a)) {
-                accepted++;
-            } else {
-                duplicates++;
-            }
-        }
-        // Applied on the game thread at the seat's next priority, so the
-        // acknowledgement is honest about *queuing*, not about Forge's verdict:
-        // the bridge reads /table/queue for the applied/rejected totals.
-        respond(ex, 200, "{\"status\":\"queued\",\"accepted\":" + accepted
-                + ",\"duplicates\":" + duplicates
-                + ",\"pending\":" + TableActionQueue.size() + "}");
+        respond(ex, 410, "{\"error\":\"Scanner mutations disabled. Use human decision prompts; scans do not play cards.\"}");
     }
-
     private static void handleTableState(HttpExchange ex) throws IOException {
-        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
-            respond(ex, 405, "{\"error\":\"POST required\"}");
-            return;
-        }
-        if (!AgentGameState.hasTableSeat()) {
-            respond(ex, 409, "{\"error\":\"no physical seat in this match\"}");
-            return;
+        handleTableEvents(ex);
+    }
+    private static void handleHumanDecision(HttpExchange ex) throws IOException {
+        if (!"POST".equals(ex.getRequestMethod())) {
+            respond(ex, 405, "{\"error\":\"POST required\"}"); return;
         }
         try {
-            TableActionQueue.Action sync = TableActionQueue.parseState(readBody(ex));
-            TableActionQueue.offer(sync);
-            respond(ex, 200, "{\"status\":\"queued\",\"pending\":"
-                    + TableActionQueue.size() + "}");
-        } catch (Throwable t) {
-            respond(ex, 400, "{\"error\":\"bad state: "
-                    + sanitize(String.valueOf(t)) + "\"}");
-        }
+            var body = MiniJson.parseObject(readBody(ex));
+            boolean ok = WebHumanSession.active() ? WebHumanSession.submit(body)
+                    : HumanDecisionChannel.submit(String.valueOf(body.get("id")), String.valueOf(body.get("choice")));
+            respond(ex, ok ? 200 : 409, ok ? "{\"status\":\"accepted\"}" : "{\"error\":\"Stale, duplicate or invalid decision; refresh state\"}");
+        } catch (RuntimeException e) { respond(ex, 400, "{\"error\":\"Invalid decision\"}"); }
     }
 
     private static void handleTableQueue(HttpExchange ex) throws IOException {
@@ -199,7 +158,8 @@ public final class AgentServer {
     }
 
     private static String readBody(HttpExchange ex) throws IOException {
-        byte[] raw = ex.getRequestBody().readAllBytes();
+        byte[] raw = ex.getRequestBody().readNBytes(65537);
+        if (raw.length > 65536) throw new IllegalArgumentException("body too large");
         return new String(raw, StandardCharsets.UTF_8);
     }
 

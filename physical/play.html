@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FlyCommander · Commander pod</title>
+<style>
+:root{color-scheme:dark}body{margin:0;background:#12141a;color:#e8ecf4;font:15px/1.5 system-ui}main{max-width:1200px;margin:auto;padding:24px}h1{margin:0}a{color:#7fd4ff}.notice,section{border:1px solid #3d4659;border-radius:10px;padding:18px;margin:16px 0;background:#1b1f2a}.notice{border-color:#c7a65a}#seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}#seats section{margin:0}button{padding:12px;margin:8px 8px 0 0;background:#285a47;color:white;border:1px solid #6aaf89;border-radius:6px;cursor:pointer}button:disabled{opacity:.4}pre{white-space:pre-wrap;font:inherit}small{color:#abb7cb}.card{padding:5px 0;border-bottom:1px solid #343c4a}h3{margin-bottom:4px}#error{color:#ffb1a4}
+</style><main>
+<header><small>FLYCOMMANDER / FOUR-SEAT COMMANDER</small><h1>Your paper table, a digital rules engine</h1><a href="/">Open scanner workspace</a></header>
+<div class="notice"><b>Experimental assisted prototype — not yet runtime-verified</b><p>You approve AI-proposed plays, keep/mulligan and pass priority. Forge AI still selects targets, mana, modes, X, combat, discards and other effect choices. This is not yet the full manual paper game.</p><p>Forge controls the shuffle and draws. Use a matching paper deck and retrieve the hand shown here. Do not draw independently. Scanning records identity only; it never casts a spell or changes this game.</p></div>
+<section><h2 id="status">Checking connection…</h2><p id="error" role="alert"></p><div id="setup"><p>Requires an installed Forge 2.0.15 distribution and a JDK. The launcher compiles the patch before starting; it fails rather than falling back to a fake game.</p><pre>python scripts/run_paper_game.py --forge-dir /path/to/forge \
+  --human-deck /path/to/your-deck.dck \
+  --ai-deck /path/to/opponent1.dck \
+  --ai-deck /path/to/opponent2.dck \
+  --ai-deck /path/to/opponent3.dck \
+  --experimental-assisted</pre><small>The scanner deck import is separate from Forge's .dck game deck. Fly opponent selection and manual action/target controls are not implemented yet.</small></div></section>
+<section id="decision" hidden><h2 id="kind"></h2><pre id="message"></pre><div id="choices"></div></section>
+<div id="seats"></div><section><h2>Stack</h2><pre id="stack">No connected game</pre></section>
+</main><script>
+let sending=false;
+const el=id=>document.getElementById(id);
+function node(tag,text){const n=document.createElement(tag);n.textContent=text;return n}
+async function refresh(){
+ try{
+ const s=await(await fetch('/api/game')).json();
+ el('status').textContent=s.status==='awaiting_decision'?`Your decision · turn ${s.turn} · ${s.phase}`:s.status==='disconnected'?'Scanner only — no game connected':`Game: ${s.status}`;
+ el('setup').hidden=Array.isArray(s.seats);
+ el('error').textContent=s.error||'';
+ el('seats').replaceChildren();
+ for(const seat of s.seats||[]){const panel=node('section','');panel.append(node('h2',seat.name),node('p',`${seat.life} life · ${seat.handCount} in hand · ${seat.libraryCount} in library`));
+ for(const zone of ['Hand','Command','Battlefield','Graveyard','Exile']){if(!seat[zone])continue;panel.append(node('h3',zone));for(const c of seat[zone]){const n=node('div',`${c.name} #${c.id}${c.tapped?' · tapped':''}`);n.className='card';panel.append(n)}}el('seats').append(panel)}
+ el('stack').textContent=(s.stack||[]).join('\n')||'Empty / no connected game';
+ el('decision').hidden=!s.prompt;el('choices').replaceChildren();
+ if(s.prompt?.options){const selected=[];for(const option of s.prompt.options){const b=node('button',option.label);b.onclick=()=>{const i=selected.indexOf(option.id);if(i>=0){selected.splice(i,1);b.style.outline=''}else{selected.push(option.id);b.style.outline='2px solid gold'}};el('choices').append(b)}const submit=node('button','Confirm selection');submit.onclick=()=>send(s.prompt.id,selected);el('choices').append(submit)}
+ if(s.prompt){el('kind').textContent=s.prompt.kind;el('message').textContent=s.prompt.message;for(const choice of s.prompt.choices||[]){const b=node('button',choice);b.disabled=sending;b.onclick=()=>send(s.prompt.id,choice);el('choices').append(b)}}
+ }catch(e){el('status').textContent='Connection lost — no action queued';el('decision').hidden=true;el('seats').replaceChildren()}
+}
+async function send(id,choice){if(sending)return;sending=true;for(const b of el('choices').children)b.disabled=true;
+ try{const r=await(await fetch('/api/game/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Array.isArray(choice)?{id,selected:choice}:{id,choice})})).json();if(r.error)alert(r.error)}catch(e){alert('Connection lost. Refresh state before retrying; do not assume the action failed.')}finally{sending=false;await refresh()}}
+async function poll(){await refresh();setTimeout(poll,1500)}poll();
+</script></html>
