@@ -197,12 +197,19 @@ occlusion, rotation):
 
 | Stage | Result |
 | --- | --- |
-| Recognition (rectified captures, no detector) | top-1 **54.3 %**, top-3 70.0 %, top-5 75.7 % |
-| — clean / occlusion / blur / sleeve | 60 % / 65 % / 55 % / 55 % top-1 |
-| — worst conditions (foil, glare) | 45 % top-1 |
-| Detection | recall ~0.95, corner error ≈ 20 px, ≈ 155 ms/frame |
-| End-to-end | top-1 60 % on a small scene sample, and **"unknown" instead of a wrong card** when the fused score is low |
+| Recognition (rectified captures, no detector) | top-1 **61.8 %**, top-3 72.5 %, top-5 78.2 % |
+| — clean / occlusion / sleeve | 70 % / 78 % / 65 % top-1 |
+| — hardest conditions (foil, glare, blur) | 55 % / 58 % / 53 % top-1 |
+| End-to-end (detector + rectification + matching, 39 cards) | top-1 **74.4 %**, and **"unknown" instead of a wrong card** when the fused score is low |
+| Detection — *does the crop contain the card?* | recall **0.98** (47/48 cards over 24 mixed scenes) |
+| Detection — *are the corners tight?* (IoU > 0.5) | recall 67 %, corner error ≈ 31 px |
+| Latency | detect ≈ 177 ms, match ≈ 49 ms per card (CPU, 1 thread) |
 | Zero-training tier (no weights, `dense` descriptor) | top-1 ~15 % — training is what buys the accuracy |
+
+The two detection rows measure different things on purpose: the pipeline only
+needs a crop that *contains* the card (the rectifier snaps edges to the true
+border before matching), while tight corners are still the main source of
+head-room — a large over-crop lowers confidence and costs the strict metric.
 
 These are synthetic-card numbers: a real camera adds glare, foil shimmer and
 depth of field that the generator only approximates, and a real library is
