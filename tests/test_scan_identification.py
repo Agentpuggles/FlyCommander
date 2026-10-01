@@ -371,3 +371,17 @@ def test_vision_status_reports_ocr_availability(app):
     status = app.vision_status()
     assert "ocrAvailable" in status
     assert "library" in status
+
+
+def test_ocr_availability_reports_the_real_reason(app):
+    """TESS_AVAILABLE only means the wrapper imports — say what is missing."""
+    from physical.card_scan import tesseract_ready
+
+    ok, why = tesseract_ready()
+    assert isinstance(ok, bool) and isinstance(why, str)
+    status = app.vision_status()
+    assert status["ocrAvailable"] is bool(status["ocrAvailable"])
+    assert "ocrDetail" in status
+    if not ok:
+        assert status["ocrAvailable"] is False
+        assert "tesseract" in status["ocrDetail"].lower()

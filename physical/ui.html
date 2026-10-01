@@ -196,8 +196,9 @@ function renderVision(v) {
     notes.push("embedder is untrained — visual matching is weak, OCR + Scryfall leads");
   }
   if (v.ocrAvailable === false) {
-    notes.push("<span style=\"color:#e6b84c\">OCR unavailable (install tesseract) — " +
-               "use “Add by name”</span>");
+    notes.push("<span style=\"color:#e6b84c\">OCR unavailable" +
+               (v.ocrDetail ? ` (${esc(v.ocrDetail)})` : "") +
+               " — use “Add by name”</span>");
   }
   if (notes.length) {
     bar.innerHTML += `<div class="muted" style="margin-top:2px">${notes.join(" · ")}</div>`;

@@ -213,6 +213,23 @@ suggestion, and it is never offered as a tappable choice
 The UI always says where a name came from: *closest in library (visual)*,
 *name (OCR)*, or the player's own typing — so a low-confidence library guess
 can never be mistaken for what the camera read.
+
+At startup the table prints which of those paths can actually answer:
+
+```
+[vision] library: 48 cards (0 real / 48 synthetic demo), 48 images
+[vision] OCR + Scryfall rescue: available (tesseract 5.3.4)
+[vision]   → the demo library cannot name real cards from pixels; Scan reads the card's text instead
+[vision]   → embedder is untrained, so visual matching is weak: scripts/train_embedder.py is what buys accuracy
+```
+
+Only tier 1 runs continuously on the live camera feed; tiers 2 and 3 are
+Scan-time or typed, because OCR is far too expensive to run per frame. Automatic
+hands-free recognition of a real card therefore needs both a real image library
+(`--sync-scryfall --images N`) **and** a trained embedder
+(`scripts/train_embedder.py`) — with the demo library and an untrained embedder,
+a real card is correctly reported as *not in library*, and Scan or "Add by name"
+is what puts it on the table.
 - The vision bar under the camera (`GET /api/vision/status`, also embedded in
   `/api/state`) shows the live index size, detector and embedder tier, and
   offers **Build index** when none exists.

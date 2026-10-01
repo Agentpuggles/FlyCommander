@@ -45,6 +45,7 @@ from physical.card_scan import (
     extract_name_crop,
     ocr_card_regions,
     pick_best_frame,
+    tesseract_ready,
 )
 
 
@@ -148,7 +149,9 @@ class PhysicalTableApp:
         status["library"] = self.card_db.library_summary()
         # the fallback path: when the visual library cannot name a card, the
         # scan OCRs it and asks Scryfall. Say so when that is unavailable.
-        status["ocrAvailable"] = bool(SCAN_AVAILABLE)
+        ocr_ok, ocr_why = tesseract_ready()
+        status["ocrAvailable"] = bool(SCAN_AVAILABLE and ocr_ok)
+        status["ocrDetail"] = ocr_why
         status["recognition"] = self.last_recognition
         status["lastScene"] = (self.recognizer.last_scene.to_dict(include_images=False)
                                if self.recognizer.last_scene else None)

@@ -38,6 +38,22 @@ except ImportError:  # pragma: no cover
 
 SCAN_AVAILABLE = CV_AVAILABLE and TESS_AVAILABLE
 
+
+def tesseract_ready() -> tuple[bool, str]:
+    """(is_usable, version_or_reason) for the OCR rescue path.
+
+    `TESS_AVAILABLE` only means the Python wrapper imports — the tesseract
+    *binary* is a separate install. Scanning cannot tell which is missing,
+    so the table reports the real reason at startup instead of silently
+    falling back to "not identified".
+    """
+    if not TESS_AVAILABLE:
+        return False, "pytesseract not installed"
+    try:
+        return True, str(pytesseract.get_tesseract_version())
+    except Exception as exc:                      # binary missing / not on PATH
+        return False, f"tesseract binary unusable ({type(exc).__name__})"
+
 # NOTE: tesseract char whitelists cannot contain spaces through pytesseract
 # (the config string is whitespace-split), so name OCR runs *without* a
 # whitelist and relies on post-normalization; the collector whitelist is
