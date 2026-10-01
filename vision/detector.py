@@ -345,7 +345,23 @@ def shape_plausibility(quad: np.ndarray,
     segmentation: long thin strips, near-square blobs, and anything that is
     basically the whole frame.
     """
+    quad = np.asarray(quad, np.float32).reshape(-1, 2)
+    if quad.shape[0] != 4:
+        return 0.0
+    # degenerate shapes first: a real card (however keystoned, sleeved or
+    # tilted) fills most of its own bounding box, while the pathological
+    # "edge" fits that gradient search can produce are slivers — two long
+    # parallel edges a few pixels apart, which the shoelace area exposes
+    poly_area = abs(float(np.dot(quad[:, 0], np.roll(quad[:, 1], -1))
+                          - np.dot(quad[:, 1], np.roll(quad[:, 0], -1)))) / 2.0
+    span = quad.max(axis=0) - quad.min(axis=0)
+    bbox_area = float(max(1.0, span[0] * span[1]))
+    fill = poly_area / bbox_area
+    if fill < 0.5:
+        return float(np.clip((fill - 0.08) / 0.42, 0.0, 1.0)) * 0.5
     w, h = R.quad_side_lengths(quad)
+    if min(w, h) < 12.0:                      # a vertex pair nearly collapsing
+        return 0.0
     long_side, short_side = max(w, h), max(1e-3, min(w, h))
     ratio = short_side / long_side
     # MTG is 0.716; sleeves and keystone move this a lot, strips do not
