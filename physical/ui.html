@@ -74,7 +74,7 @@
 </head>
 <body>
 <header>
-  <h1>MAGIC FLY</h1>
+  <h1>MAGIC FLY</h1><a href="/play" style="color:var(--fly)">Commander pod (experimental)</a>
   <div class="life fly">🪰 <b id="flyLife">40</b>
     <button onclick="life('fly',-1)">−1</button><button onclick="life('fly',-5)">−5</button>
     <button onclick="life('fly',5)">+5</button><button onclick="life('fly',1)">+1</button>
@@ -101,11 +101,29 @@
   </div>
 
   <div class="panel" id="camPanel">
-    <h2>YOUR BOARD (camera)</h2>
+    <h2>YOUR PAPER TABLE</h2>
+    <p class="muted">Scanner workspace — observations only, not a rules-managed game. Import your deck, scan and confirm identity.</p>
+    <details id="deckSetup" style="margin-bottom:12px" open>
+      <summary><b>Deck scanner setup</b> — real artwork, no model training</summary>
+      <p class="muted">Paste names or an Arena export. Include set + collector number for your exact artwork.
+        Name-only imports cover up to four recent illustrations, not every printing. Imports use Scryfall; subsequent artwork scans stay local.</p>
+      <textarea id="deckText" rows="5" style="width:100%;box-sizing:border-box" aria-label="Deck list"
+        placeholder="Commander&#10;1 The Gitrog Monster (SOI) 245&#10;Deck&#10;1 Sol Ring&#10;10 Forest"></textarea>
+      <button id="importDeckBtn" class="primary" onclick="importDeck()">Import real card images</button>
+      <div id="deckStatus" class="muted" role="status" aria-live="polite">No import running.</div>
+    </details>
+    <div class="row">
+      <button id="browserCamBtn" onclick="startBrowserCamera()">Use this device’s camera</button>
+      <button onclick="useServerCamera()">Use server camera</button>
+      <label class="muted">Or upload a photo <input type="file" id="scanPhoto" accept="image/*" onchange="scanPhoto(this)"></label>
+    </div>
+    <p id="cameraStatus" class="muted" role="status">Server camera selected. For a remote server, choose this device’s camera.</p>
+    <video id="browserCam" autoplay playsinline muted style="width:100%;border-radius:8px;display:none"></video>
     <img id="cam" alt="camera stream" style="width:100%;border-radius:8px;background:#000;display:block">
     <div class="row">
       <button class="primary" id="scanBtn" onclick="scanBurst()">📷 Scan card</button>
       <button id="identifyBtn" onclick="identifyNow()">🔍 Identify all</button>
+      <label class="muted"><input type="checkbox" id="liveScan" onchange="toggleLiveScan()"> Live identification (confirm to add)</label>
       <input id="regSet" placeholder="set (FDN)" size="7">
       <input id="regNum" placeholder="#216" size="6">
       <button onclick="registerManual()">Manual</button>
@@ -173,6 +191,13 @@ function renderVision(v) {
   const bar = document.getElementById("visionBar");
   if (!v) { bar.textContent = ""; return; }
   const emb = v.embedder || {};
+  renderDeckStatus(v.deckImport);
+  const ref = v.referenceScanner || {};
+  if (ref.ready) {
+    bar.innerHTML = `<b>Artwork scanner ready</b> · ${ref.references} reference faces · SIFT + perspective verification` +
+      `<div class="muted">Scores describe match strength, not accuracy percentages. Confirm before adding; reference printing may differ.</div>`;
+    return false;
+  }
   const detector = v.detector || "?";
   const idx = v.indexSize || 0;
   const ready = v.ready;
@@ -187,7 +212,7 @@ function renderVision(v) {
     `index <b>${idx}</b> cards · detector ${esc(detector)} · ` +
     `embedder ${esc(emb.name || "?")}${emb.trained ? " (trained)" : " (untrained)"}` +
     (v.indexError ? ` · <span style="color:#e6b84c">${esc(v.indexError)}</span>` : "") +
-    (ready ? "" : ` <button onclick="buildIndex()">Build index</button>`);
+    (ready ? "" : ` <button onclick="document.getElementById('deckSetup').open=true">Import deck</button>`);
   const notes = [];
   if (syntheticOnly) {
     notes.push(`demo library (${lib.synthetic} synthetic cards) — real cards are ` +
@@ -223,7 +248,7 @@ function renderForge(f) {
     (f.pending || f.dropped
       ? ` <span class="muted">(physical spool ${f.pending}${f.dropped ? ", dropped " + f.dropped : ""})</span>` : "") +
     (f.connected ? "" : ` <button onclick="refreshForge()">Retry</button>`) +
-    ` <button onclick="syncForge()">Sync to Forge</button>`;
+    ` <span>Legacy mirror is not legal casting. Use the Commander pod.</span>`;
 }
 
 async function refreshForge() {
@@ -239,7 +264,7 @@ async function syncForge() {
   await refresh();
 }
 
-async function buildIndex(synthetic = 48) {
+async function buildIndex(synthetic = 0) {
   const bar = document.getElementById("visionBar");
   bar.innerHTML = "building recognition index…";
   const r = await post("vision/index", {synthetic});
@@ -248,15 +273,38 @@ async function buildIndex(synthetic = 48) {
   await refresh();
 }
 
+let identifyBusy = false;
+let liveTimer = null;
 async function identifyNow() {
+  if (identifyBusy) return;
+  identifyBusy = true;
   const el = document.getElementById("recognisedBox");
-  el.innerHTML = `<div class="box">identifying…</div>`;
-  const r = await (await fetch(API + "/api/vision/identify", {method: "POST",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({})})).json();
-  renderRecognised(r);
-  await refresh();
+  document.getElementById("identifyBtn").disabled = true;
+  try {
+    const images = await captureBrowserFrames(1);
+    const r = await (await fetch(API + "/api/vision/identify", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({images})})).json();
+    renderRecognised(r);
+  } catch (e) {
+    el.innerHTML = `<div class="box bad">${esc(e.message)}</div>`;
+    document.getElementById("liveScan").checked = false;
+  } finally {
+    identifyBusy = false;
+    document.getElementById("identifyBtn").disabled = false;
+    if (document.getElementById("liveScan").checked) liveTimer = setTimeout(identifyNow, 1200);
+  }
+}
+function toggleLiveScan() {
+  clearTimeout(liveTimer);
+  if (document.getElementById("liveScan").checked) identifyNow();
 }
 
+function referencePreview(candidate) {
+  if (candidate.source !== "reference-art") return "";
+  const filename = (candidate.imagePath || "").split(/[\\/]/).pop();
+  if (!/^[a-f0-9]{24}\.jpg$/.test(filename)) return "";
+  return `<img alt="Reference card artwork" src="${API}/api/vision/reference/${filename}" style="width:72px;border-radius:5px">`;
+}
 function renderRecognised(r) {
   const el = document.getElementById("recognisedBox");
   if (!r || r.status !== "ok") {
@@ -265,7 +313,7 @@ function renderRecognised(r) {
   }
   const cards = r.cards || [];
   if (!cards.length) {
-    el.innerHTML = `<div class="box bad">No card detected — place a card in view.</div>`;
+    el.innerHTML = `<div class="box bad">No artwork verified — check your imported printing, move closer, or use Scan for OCR.</div>`;
     return;
   }
   let html = "";
@@ -274,6 +322,19 @@ function renderRecognised(r) {
     const top = (m.candidates || [])[0];
     const conf = top ? Math.round(top.confidence * 100) : 0;
     const unknown = m.unknown;
+    if (top && top.source === "reference-art") {
+      html += `<div class="box" style="margin-top:8px"><b>${unknown ? "CHECK THIS MATCH" : "ARTWORK MATCHED"}</b>` +
+        (c.cardImage ? `<img alt="Scanned card" src="${esc(c.cardImage)}" style="width:90px;float:right;margin:6px">` : "");
+      (m.candidates || []).forEach(choice => {
+        const payload = {name: choice.name, set: choice.set, collectorNumber: choice.collectorNumber,
+          confidence: choice.confidence, trackId: c.trackId, addToIndex: false};
+        html += `<div class="row">${referencePreview(choice)}<span><b>${esc(choice.name)}</b><br><span class="muted">` +
+          `${choice.scores.artInliers || 0} artwork points · reference ${esc(choice.set)} #${esc(choice.collectorNumber)}</span></span>` +
+          `<button onclick='confirmRecognition(${esc(JSON.stringify(JSON.stringify(payload)))})'>Add to battlefield</button></div>`;
+      });
+      html += `<div class="muted" style="clear:both">Confirm the name. Reference printing may differ.</div></div>`;
+      return;
+    }
     html += `<div class="box ${unknown ? "" : "good"}" style="margin-top:6px">`;
     html += `<b>${unknown ? "NOT IN LIBRARY" : "RECOGNISED"}</b> `;
     html += top ? `<b>${esc(top.name)}</b> <span class="muted">[${esc(top.set)} #${esc(top.collectorNumber)}] ${conf}%</span>`
@@ -306,8 +367,11 @@ function renderRecognised(r) {
 
 async function confirmRecognition(payloadJson) {
   const payload = JSON.parse(payloadJson);
-  await post("vision/register", payload);
-  document.getElementById("recognisedBox").innerHTML = "";
+  document.getElementById("liveScan").checked = false;
+  clearTimeout(liveTimer);
+  const r = await post("vision/register", payload);
+  document.getElementById("recognisedBox").innerHTML = r.error
+    ? `<div class="box bad">${esc(r.error)}</div>` : "";
   await refresh();
 }
 
@@ -424,9 +488,98 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest("#actionPopup") && !e.target.closest(".card")) hidePopup();
 });
 
+// Browser camera stays on this device; only explicit/live identification frames are sent.
+let browserStream = null;
+async function startBrowserCamera() {
+  const status = document.getElementById("cameraStatus");
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("Camera needs HTTPS or localhost. Use a photo upload instead.");
+    if (browserStream) return;
+    const stream = await navigator.mediaDevices.getUserMedia({audio: false,
+      video: {facingMode: {ideal: "environment"}, width: {ideal: 1920}, height: {ideal: 1080}}});
+    browserStream = stream;
+    const video = document.getElementById("browserCam");
+    video.srcObject = stream;
+    await video.play();
+    video.style.display = "block";
+    const cam = document.getElementById("cam");
+    cam.onerror = null; cam.removeAttribute("src"); cam.style.display = "none";
+    status.textContent = "This device’s camera active. Hold the card in view, then Scan. Live identification is opt-in.";
+  } catch (e) {
+    if (browserStream) browserStream.getTracks().forEach(t => t.stop());
+    browserStream = null;
+    status.textContent = "Could not open camera: " + e.message + ". Try a photo upload or server camera.";
+  }
+}
+function useServerCamera() {
+  if (browserStream) browserStream.getTracks().forEach(t => t.stop());
+  browserStream = null;
+  const video = document.getElementById("browserCam");
+  video.srcObject = null; video.style.display = "none";
+  document.getElementById("cam").style.display = "block";
+  document.getElementById("cameraStatus").textContent = "Server camera selected.";
+  camRetries = 0; ensureCam();
+}
+window.addEventListener("pagehide", () => {
+  if (browserStream) browserStream.getTracks().forEach(t => t.stop());
+});
+function imageFrame(source, w, h) {
+  if (!w || !h) throw new Error("Camera is warming up; try again in a moment");
+  const scale = Math.min(1, 1600 / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
+  canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", .92);
+}
+async function captureBrowserFrames(count = 3) {
+  if (!browserStream) return [];
+  const video = document.getElementById("browserCam");
+  const frames = [];
+  for (let i = 0; i < count; i++) {
+    frames.push(imageFrame(video, video.videoWidth, video.videoHeight));
+    if (i < count - 1) await new Promise(resolve => setTimeout(resolve, 120));
+  }
+  return frames;
+}
+async function scanPhoto(input) {
+  const file = input.files[0];
+  if (!file) return;
+  document.getElementById("liveScan").checked = false;
+  clearTimeout(liveTimer);
+  try {
+    if (file.size > 20 * 1024 * 1024) throw new Error("Choose a photo under 20 MB");
+    const bitmap = await createImageBitmap(file);
+    const frame = imageFrame(bitmap, bitmap.width, bitmap.height);
+    bitmap.close();
+    await scanBurst([frame]);
+  } catch (e) { document.getElementById("cameraStatus").textContent = e.message; }
+  finally { input.value = ""; }
+}
+async function importDeck() {
+  const button = document.getElementById("importDeckBtn");
+  button.disabled = true;
+  try {
+    const r = await (await fetch(API + "/api/vision/deck", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({deck:document.getElementById("deckText").value})})).json();
+    document.getElementById("deckStatus").textContent = r.error || "Downloading real reference images…";
+    if (r.error) button.disabled = false;
+  } catch (e) {
+    document.getElementById("deckStatus").textContent = e.message;
+    button.disabled = false;
+  }
+}
+function renderDeckStatus(job) {
+  if (!job || job.status === "idle") return;
+  document.getElementById("importDeckBtn").disabled = job.status === "running";
+  document.getElementById("deckStatus").textContent = `${job.status}: ${job.done}/${job.total} cards processed · ` +
+    `${job.scanner?.references || 0} usable reference faces. ` + (job.errors || []).join("; ");
+}
+
 // --- camera: server-owned MJPEG stream (watcher holds /dev/video0) -----
 let camRetries = 0;
 function ensureCam() {
+  if (browserStream) return;
   const v = document.getElementById("cam");
   v.src = API + "/api/camera/stream?ts=" + Date.now();  // MJPEG in <img>
   v.onerror = () => {
@@ -441,18 +594,23 @@ function ensureCam() {
 }
 ensureCam();
 
-function esc(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+function esc(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
 
-async function scanBurst() {
+async function scanBurst(suppliedImages = null) {
+  clearTimeout(liveTimer);
+  document.getElementById("liveScan").checked = false;
   const btn = document.getElementById("scanBtn");
   btn.disabled = true; btn.textContent = "Scanning…";
   try {
-    // server samples its own burst from /dev/video0 and picks the sharpest
+    const images = suppliedImages || await captureBrowserFrames();
+    // Empty list selects the server-owned camera; otherwise use this device.
     const r = await (await fetch(API + "/api/register/frame", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({})})).json();
+      body: JSON.stringify({images})})).json();
     renderScan(r);
     await refresh();
+  } catch (e) {
+    renderScan({status:"error", error:e.message});
   } finally {
     btn.disabled = false; btn.textContent = "📷 Scan card";
   }
@@ -496,25 +654,26 @@ function renderScan(r) {
       html += `<b>CARD DETECTED & REGISTERED</b><br><b style="font-size:16px">${esc(r.registered.name)}</b><br>`;
       if (r.registered.duplicate) html += `<span class="muted">(already on battlefield — tracked)</span><br>`;
     } else if (cand.length) {
-      html += `<b>WHICH CARD?</b>`;
+      html += `<b>CONFIRM CARD</b>` + (r.message ? `<p>${esc(r.message)}</p>` : "");
     } else {
       html += `<b>Card seen, not identified</b>` +
               (r.message ? ` — ${esc(r.message)}` : ` — better light or Retry Scan may help`);
     }
-    html += confLine;
+    if (r.pipeline !== "reference-art") html += confLine;
+    else if (r.rectifiedCard) html += `<img alt="Scanned card" src="${esc(r.rectifiedCard)}" style="width:100px">`;
     // Never call the visual library's best guess "OCR": say where the name
     // actually came from, so a 5% library neighbour reads as what it is.
     const src = ev.source || "";
     const nameLabel = (src === "ocr-name" || src === "ocr-collector") ? "name (OCR)"
-      : (src === "visual-index" ? "closest in library (visual)" : "name");
+      : (src === "visual-index" ? "closest in library (visual)" : src === "reference-art" ? "artwork match" : "name");
     html += `<div class="muted">${nameLabel}: “${esc(ev.nameRaw)}” ` +
-            `${ev.nameConfidence != null ? Math.round((ev.nameConfidence||0)*100) + "%" : ""} · ` +
+            `${ev.nameConfidence != null && src !== "reference-art" ? Math.round((ev.nameConfidence||0)*100) + "%" : ""} · ` +
             `set: ${esc(ev.set) || "—"} · collector: ${esc(ev.collectorNumber) || "—"}</div>`;
     if (!r.registered && cand.length) {
       cand.forEach((c, i) => {
-        html += `<div class="cand"><span>${i + 1}. ${esc(c.name)} ` +
+        html += `<div class="cand">${referencePreview(c)}<span>${i + 1}. ${esc(c.name)} ` +
                 `<span class="muted">[${esc(c.set)} #${esc(c.collectorNumber)}] ` +
-                `${Math.round(((c.combinedConfidence ?? c.confidence)||0)*100)}%</span></span>` +
+                `${src === "reference-art" ? (c.scores?.artInliers || 0) + " artwork points" : Math.round(((c.combinedConfidence ?? c.confidence)||0)*100) + "%"}</span></span>` +
                 `<button onclick="registerCandidate(${i})">Select</button></div>`;
       });
     }
@@ -537,8 +696,10 @@ function renderScan(r) {
 }
 
 async function registerCandidate(i) {
-  await post("register/candidate", {index: i});
-  document.getElementById("scanResult").innerHTML = "";
+  const r = await post("register/candidate", {index: i});
+  document.getElementById("scanResult").innerHTML = r.error
+    ? `<div class="box bad">${esc(r.error)}</div>` : "";
+  await refresh();
 }
 
 async function registerManual() {

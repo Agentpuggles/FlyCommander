@@ -28,11 +28,16 @@ public final class BrainClient {
 
     /** Returns macro-action index 0..3, or -1 if the brain is unreachable. */
     public static int queryAction(String observationJson, String context) {
+        return queryAction(brainUrl, observationJson, context);
+    }
+
+    /** Explicit per-seat URL: separate brains must never share a mutable default. */
+    public static int queryAction(String url, String observationJson, String context) {
         try {
             String body = "{\"observation\":" + (observationJson == null ? "{}" : observationJson)
                     + ",\"context\":\"" + (context == null ? "" : context) + "\"}";
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(brainUrl))
+                    .uri(URI.create(url))
                     .timeout(TIMEOUT)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body))

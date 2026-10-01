@@ -28,6 +28,7 @@ final class MiniJson {
         p.skipWs();
         Object value = p.value();
         p.skipWs();
+        if (p.pos != text.length()) throw new IllegalArgumentException("trailing JSON");
         return value;
     }
 
@@ -38,6 +39,28 @@ final class MiniJson {
             return (Map<String, Object>) value;
         }
         throw new IllegalArgumentException("expected a JSON object");
+    }
+
+    static String stringify(Object value) {
+        if (value == null) return "null";
+        if (value instanceof Boolean || value instanceof Number) return value.toString();
+        if (value instanceof Map<?, ?> map) {
+            List<String> parts = new ArrayList<>();
+            for (var e : map.entrySet()) parts.add(stringify(e.getKey().toString()) + ":" + stringify(e.getValue()));
+            return "{" + String.join(",", parts) + "}";
+        }
+        if (value instanceof Iterable<?> items) {
+            List<String> parts = new ArrayList<>();
+            for (Object item : items) parts.add(stringify(item));
+            return "[" + String.join(",", parts) + "]";
+        }
+        StringBuilder out = new StringBuilder("\"");
+        for (char c : value.toString().toCharArray()) {
+            if (c == '"' || c == '\\') out.append('\\').append(c);
+            else if (c < 32) out.append(String.format("\\u%04x", (int)c));
+            else out.append(c);
+        }
+        return out.append('"').toString();
     }
 
     // ------------------------------------------------------------------

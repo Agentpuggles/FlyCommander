@@ -1,9 +1,9 @@
 """FlyCommander physical-table mode — local server + UI.
 
 Zero new dependencies: stdlib http.server + a single-page HTML/JS UI.
-The *server* owns the camera (one V4L2 capture loop in physical/camera_watcher.py)
-and streams MJPEG to the browser; it also owns state, events, registration
-and the fly brain. The browser only displays the stream and posts actions.
+The server can own a camera (one V4L2 capture loop in physical/camera_watcher.py)
+and stream MJPEG, or accept frames from a browser camera/photo; it also owns state, events, registration
+and the fly brain. The browser posts actions and optional camera frames over same-origin HTTP.
 
 Endpoints:
   GET  /                     UI page
@@ -46,6 +46,7 @@ from physical.card_scan import (
     extract_name_crop,
     ocr_card_regions,
     pick_best_frame,
+    score_frame_quality,
     tesseract_ready,
 )
 
@@ -65,6 +66,7 @@ from physical.scryfall_cache import ScryfallCache
 from physical.state import PhysicalGameState
 from physical.vision_pipeline import CardRecognizer, RecognitionConfig
 from flycommander.forge_table_bridge import ForgeTableBridge
+from flycommander.human_game import HumanGameClient
 
 UI_PATH = Path(__file__).resolve().parent / "ui.html"
 
@@ -81,6 +83,7 @@ class PhysicalTableApp:
                  checkpoint: str | None = None,
                  allow_network: bool = True,
                  camera_config: str | Path | None = None) -> None:
+        self.human_game = HumanGameClient()
         self.state = PhysicalGameState()
         self.log = EventLog(log_path or Path(data_dir) / "events.jsonl")
         self.engine = Engine(self.state, self.log)
@@ -107,6 +110,9 @@ class PhysicalTableApp:
                                     allow_network=allow_network)
         self.recognizer = CardRecognizer(self.vision_config,
                                          database=self.card_db)
+        from physical.deck_library import DeckLibrary
+        self.deck_library = DeckLibrary(self.recognizer.reference_scanner,
+                                        self.card_db.client, self.cache)
         self.last_recognition: dict | None = None
         # ---- Forge bridge: the physical mirror feeds the real rules engine --
         self.forge = ForgeTableBridge(
@@ -150,6 +156,7 @@ class PhysicalTableApp:
     def vision_status(self) -> dict:
         """Index/embedder/detector state for the UI vision panel."""
         status = self.recognizer.status()
+        status["deckImport"] = self.deck_library.status()
         status["cards"] = self.card_db.stats()
         status["library"] = self.card_db.library_summary()
         # the fallback path: when the visual library cannot name a card, the
@@ -209,10 +216,7 @@ class PhysicalTableApp:
         if synthetic:
             notes.append(f"synthetic cards added: {self.card_db.import_synthetic(synthetic)}")
         if self.card_db.store.image_count() == 0:
-            # a table with no images is useless: seed the demo library so the
-            # pipeline is immediately usable and verifiable
-            added = self.card_db.import_synthetic(synthetic or 48)
-            notes.append(f"seeded {added} synthetic cards (no images found)")
+            return {"status": "error", "error": "No reference images. Import your deck first; demo cards are not real Magic cards."}
         info = self.recognizer.build_index(limit=limit)
         info["notes"] = notes
         info["cards"] = self.card_db.stats()
@@ -246,11 +250,26 @@ class PhysicalTableApp:
                     self.recognizer.save_index()
             except Exception as exc:      # pragma: no cover - defensive
                 added_to_index = {"error": f"{type(exc).__name__}: {exc}"}
+        info = self.cache.get(set_code, number, use_network=False)
+        scanner = getattr(self.recognizer, "reference_scanner", None)
+        face = scanner.card_info(set_code, number, name) if scanner else {}
+        track_id = str(payload.get("trackId", ""))
+        bound = self.observer.track_to_state.get(track_id) if track_id else None
+        if bound and self.state.get(bound) and self.state.get(bound).name == name:
+            return {"status": "ok", "trackingId": bound, "name": name, "duplicate": True}
         reg = self.engine.apply_player(
             "card_registered", name=name, set=set_code, collectorNumber=number,
-            cardType=payload.get("cardType", ""), zone=zone,
+            cardType=face.get("cardType") or payload.get("cardType") or (info.card_type if info else ""), zone=zone,
+            basePower=face.get("basePower") if face else (info.base_power if info else None),
+            baseToughness=face.get("baseToughness") if face else (info.base_toughness if info else None),
+            oracleId=face.get("oracleId") or (info.oracle_id if info else ""),
             controller="player",
             confidence=float(payload.get("confidence") or 0.9))
+        if reg.get("trackingId"):
+            if track_id:
+                self.observer.bind(track_id, reg["trackingId"])
+            self.mirror_to_forge({"type": "card_registered", "origin": "player",
+                                  "payload": {"trackingId": reg["trackingId"]}})
         return {"status": "ok", **{k: v for k, v in reg.items() if k != "status"},
                 "name": name, "index": added_to_index}
 
@@ -368,15 +387,19 @@ class PhysicalTableApp:
         Legacy keys (status/nocard/quality/message/candidates) are preserved
         for the existing UI.
         """
+        self._last_candidates = []
         import base64
         if not SCAN_AVAILABLE and not self.recognizer.ready:
             return {"status": "error", "state": "error",
-                    "error": "OpenCV/Tesseract missing on server; use manual entry",
+                    "error": "No artwork library or usable OCR. Import your deck images, install requirements-physical.txt, or use Add by name.",
                     "candidates": []}
         if self.recognizer.ready:
             neural = self.scan_frames_neural(images_b64)
             if neural is not None:
-                return neural
+                if not (neural.get("status") == "nocard" and SCAN_AVAILABLE
+                        and getattr(self.recognizer, "reference_scanner", None)
+                        and self.recognizer.reference_scanner.ready):
+                    return neural
         frames: list = []
         for b64 in (images_b64 or [])[:12]:
             try:
@@ -558,7 +581,9 @@ class PhysicalTableApp:
                            if k in ("rectifiedCard", "nameCrop", "collectorCrop")})
         # auto-register the confident top candidate — but never duplicate a
         # card already on the battlefield (Commander is singleton)
-        if (offerable
+        reference_mode = bool(getattr(self.recognizer, "reference_scanner", None)
+                              and self.recognizer.reference_scanner.ready)
+        if (offerable and not reference_mode
                 and offerable[0].combined_confidence
                 >= self.vision_config.ocr_auto_accept_confidence):
             top = offerable[0]
@@ -591,6 +616,7 @@ class PhysicalTableApp:
         the full recognition payload, so the existing UI keeps working while
         the new panel gets richer data.
         """
+        self._last_candidates = []
         if not CV_AVAILABLE or not self.recognizer.ready:
             return None
         import base64
@@ -609,7 +635,7 @@ class PhysicalTableApp:
             return {"status": "error", "state": "error",
                     "error": "no readable frames", "candidates": [],
                     "pipeline": "neural"}
-        frame = frames[-1]
+        _, frame, _ = pick_best_frame(frames)
         try:
             frame_quality = float(score_frame_quality(frame).score)
         except Exception:      # never fail a scan over a quality metric
@@ -622,10 +648,13 @@ class PhysicalTableApp:
                                            for c in scene.cards],
                                  "timings": scene.timings}
         if best is None:
+            reference_mode = bool(getattr(self.recognizer, "reference_scanner", None)
+                                  and self.recognizer.reference_scanner.ready)
             self.last_scan = {"pipeline": "neural", "scene": scene.to_dict()}
             return {"status": "nocard", "state": "no_card", "card_detected": False,
                     "confidence": 0.0, "candidates": [], "pipeline": "neural",
-                    "message": "No card detected — place a card in view.",
+                    "message": ("No artwork verified — import this printing, move closer, or add by name."
+                                if reference_mode else "No card detected — place a card in view."),
                     "analysis": scene.to_dict()}
         # the *identity* candidates for the card being scanned (what the UI
         # and the WHICH CARD? chooser need), plus the other cards in view
@@ -637,6 +666,7 @@ class PhysicalTableApp:
         other_cards = [c.to_dict(include_image=False) for c in scene.cards
                        if c is not best]
         top = best.top
+        reference_match = bool(top and top.source == "reference-art")
 
         # ---- OCR rescue -------------------------------------------------
         # A demo/synthetic library (or an untrained embedder) can never name
@@ -648,7 +678,7 @@ class PhysicalTableApp:
                        or top.confidence < self.vision_config.suggest_confidence)
         rescue: dict = {}
         ocr_candidates: list = []
-        if weak_visual and self.vision_config.ocr_rescue and SCAN_AVAILABLE:
+        if weak_visual and not reference_match and self.vision_config.ocr_rescue and SCAN_AVAILABLE:
             rescue = self._ocr_rescue_scan(best, frame_quality=frame_quality)
             ocr_candidates = list(rescue.get("candidates") or [])
 
@@ -662,12 +692,12 @@ class PhysicalTableApp:
         # NOT this card" — offering that same card as a pick would contradict
         # our own pipeline, so only OCR/name evidence can rescue those. (The
         # closest card is still reported, as a diagnostic, in the message.)
-        offer_pool = (all_ranked if not best.match.unknown
+        offer_pool = (all_ranked if reference_match or not best.match.unknown
                       else [c for c in all_ranked if not isinstance(c, dict)])
         ranked = [c for c in offer_pool
                   if self._candidate_confidence(c)
                   >= self.vision_config.min_offer_confidence]
-        self._last_candidates = ranked
+        self._last_candidates = ranked[:5]
         candidates = [c if isinstance(c, dict) else c.to_dict() for c in ranked]
         offerable = candidates
 
@@ -678,7 +708,7 @@ class PhysicalTableApp:
         # live watcher path still requires the identity to be stable
         stable_enough = (best.stable_votes >= self.vision_config.stable_votes
                          or bool(images_b64))
-        if (top is not None and not best.match.unknown
+        if (not reference_match and top is not None and not best.match.unknown
                 and top.confidence >= self.vision_config.auto_accept_confidence
                 and stable_enough):
             registered = self._register_identified(
@@ -730,7 +760,8 @@ class PhysicalTableApp:
                        " Check the lighting, or add it by name below.")
         else:
             status = "ok"
-            message = ""
+            message = ("Artwork matched. Confirm the name before adding it; the reference printing may differ."
+                       if reference_match else "")
         if evidence:
             name_source = "ocr-name" if evidence.get("nameRaw") else (
                 "ocr-collector" if evidence.get("collectorNumber") else "visual-index")
@@ -740,7 +771,7 @@ class PhysicalTableApp:
             "status": status,
             "state": "card_detected",
             "card_detected": True,
-            "pipeline": "neural" + ("+ocr" if ocr_candidates else ""),
+            "pipeline": "reference-art" if reference_match else "neural" + ("+ocr" if ocr_candidates else ""),
             "confidence": max(
                 [top.confidence if top else 0.0]
                 + [self._candidate_confidence(c) for c in ocr_candidates] or [0.0]),
@@ -754,7 +785,7 @@ class PhysicalTableApp:
                          "set": (evidence.get("set") or (top.set_code if top else "")),
                          "collectorNumber": (evidence.get("collectorNumber")
                                              or (top.collector_number if top else "")),
-                         "source": name_source},
+                         "source": "reference-art" if reference_match else name_source},
             "message": message,
             "rectifiedCard": (self.last_scan["recognised"] or {}).get("cardImage"),
             "nameCrop": rescue.get("nameCrop"),
@@ -899,31 +930,14 @@ class PhysicalTableApp:
     def register_candidate(self, index: int) -> dict:
         """Player picked one of the offered candidates (OCR or neural path)."""
         cand_list = getattr(self, "_last_candidates", [])
-        if not cand_list:
-            scan = self.last_scan or {}
-            scene_cards = ((scan.get("scene") or {}).get("cards") or [])
-            if scan.get("pipeline") == "neural" and scene_cards:
-                cand_list = [c["match"]["candidates"] for c in scene_cards
-                             if c.get("match", {}).get("candidates")]
-                cand_list = [c for group in cand_list for c in group]
-            if not cand_list:
-                rec = (scan.get("recognised") or {}).get("match", {})
-                cand_list = list(rec.get("candidates") or [])
-            if not cand_list:
-                return {"status": "error", "error": "no scan to register from"}
-        if index >= len(cand_list):
-            return {"status": "error", "error": "no such candidate"}
+        if not cand_list or index < 0 or index >= len(cand_list):
+            return {"status": "error", "error": "no such candidate; scan again"}
         raw = cand_list[index]
         if isinstance(raw, dict) and "name" in raw and "combinedConfidence" not in raw:
-            # neural candidate dict
-            reg = self.engine.apply_player(
-                "card_registered", name=raw.get("name", ""),
-                set=raw.get("set", ""),
-                collectorNumber=str(raw.get("collectorNumber", "")),
-                cardType=raw.get("cardType", ""), zone="battlefield",
-                controller="player",
-                confidence=float(raw.get("confidence") or 0.7))
-            return {"status": "ok", **reg, "name": raw.get("name", "")}
+            # Same confirmation path as Identify all: track-aware duplicate
+            # prevention, face metadata, observer binding and Forge mirroring.
+            self._last_candidates = []
+            return self.vision_register({**raw, "addToIndex": False})
         c = raw
         reg = self.engine.apply_player(
             "card_registered", name=c.name, set=c.set_code,
@@ -931,7 +945,8 @@ class PhysicalTableApp:
             basePower=c.base_power, baseToughness=c.base_toughness,
             zone="battlefield", controller="player",
             confidence=c.combined_confidence)
-        return {"status": "ok", **reg, "name": c.name}
+        self._last_candidates = []
+        return {**reg, "status": "ok", "name": c.name}
 
     # ------------------------------------------------------------------
     # debug endpoints
@@ -1078,6 +1093,15 @@ class PhysicalTableServer:
                 path = self.path.split("?", 1)[0]
                 if path == "/" or path.startswith("/index"):
                     self._send(200, ui_html(), "text/html; charset=utf-8")
+                elif path == "/play":
+                    content = (UI_PATH.parent / "play.html").read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
+                elif path == "/api/game":
+                    self._send_json(200, app.human_game.state())
                 elif path == "/api/state":
                     self._send_json(200, app.ui_snapshot())
                 elif path == "/api/pending":
@@ -1096,6 +1120,19 @@ class PhysicalTableServer:
                         self._send_json(503, {"error": "camera warming up"})
                     else:
                         self._send(200, jpeg, "image/jpeg")
+                elif path.startswith("/api/vision/reference/"):
+                    import re
+                    filename = path.rsplit("/", 1)[-1]
+                    if not re.fullmatch(r"[a-f0-9]{24}\.jpg", filename):
+                        self._send_json(404, {"error": "reference not found"})
+                    else:
+                        image = app.recognizer.reference_scanner.root / filename
+                        if image.is_file():
+                            self._send(200, image.read_bytes(), "image/jpeg")
+                        else:
+                            self._send_json(404, {"error": "reference not found"})
+                elif path == "/api/vision/deck":
+                    self._send_json(200, app.deck_library.status())
                 elif path == "/api/vision/status":
                     self._send_json(200, app.vision_status())
                 elif path == "/api/forge/status":
@@ -1117,7 +1154,9 @@ class PhysicalTableServer:
             def do_POST(self):
                 body = self._read_json()
                 try:
-                    if self.path.split("?",1)[0] == "/api/event":
+                    if self.path.split("?",1)[0] == "/api/game/decision":
+                        self._send_json(200, app.human_game.decide(body))
+                    elif self.path.split("?",1)[0] == "/api/event":
                         out = app.apply_player_event(
                             str(body.get("type", "")),
                             body.get("payload", {}))
@@ -1137,6 +1176,8 @@ class PhysicalTableServer:
                         self._send_json(200, app.vision_identify(
                             list(body.get("images", [])),
                             include_images=bool(body.get("includeImages", True))))
+                    elif self.path.split("?",1)[0] == "/api/vision/deck":
+                        self._send_json(200, app.deck_library.start(body.get("deck", "")))
                     elif self.path.split("?",1)[0] == "/api/vision/index":
                         self._send_json(200, app.vision_build_index(
                             synthetic=int(body.get("synthetic", 0)),

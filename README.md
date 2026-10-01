@@ -147,7 +147,81 @@ make physical          # → http://127.0.0.1:8795
 #        --checkpoint checkpoints/fly_ep50.npz --offline
 ```
 
-### Neural recognition (primary path)
+### Recommended: real-artwork deck scanner
+
+The deck scanner uses **SIFT artwork features + RANSAC perspective verification**,
+not the experimental untrained neural descriptor or synthetic demo cards. It
+locates matching artwork directly in a frame, including rotated cards, without
+requiring readable name text or a successfully detected outer border.
+
+```bash
+make physical-setup
+make physical-check
+make physical
+# Remote server / browser camera only:
+.venv/bin/python scripts/physical_table.py --no-camera
+```
+
+1. Open the table UI and paste your deck under **Deck scanner setup**. One name
+   per line works; an Arena export with the exact printing is better:
+   `1 The Gitrog Monster (SOI) 245`.
+2. Click **Import real card images**. Progress and individual failures are shown.
+   Name-only imports fetch up to four recent distinct illustrations per name;
+   they do **not** cover every printing. Specify your set and collector number
+   when your artwork differs. Both image-bearing faces of double-faced cards
+   are imported when their artwork layout is supported. Sagas, Classes, Cases,
+   Rooms, split/battle/flip and other unusual layouts are conservatively refused
+   by artwork import (use Add by name). Adventure recognition and transforming existing
+   battlefield objects are not specifically implemented by this scanner.
+3. Choose **Use this device’s camera**, the server camera, or upload a photo.
+   Browser capture needs HTTPS or localhost and camera permission. The browser
+   sends frames to the same server only on Scan/Identify or when you explicitly
+   enable live identification. Nothing is sent to a third-party vision service.
+4. **Scan card** offers the largest verified card. **Identify all** / optional
+   **Live identification** show verified cards and reference pictures. Check
+   the name, then confirm to add to the battlefield. Separate copies can be
+   added; repeated confirmation of the same bound track does not add duplicates.
+
+All artwork matches require confirmation. Match strengths are heuristics, **not
+calibrated accuracy percentages**. Shared art cannot prove an exact printing.
+Ambiguous identities are offered for checking, not silently registered. An
+unverified frame produces no reference identity; Scan may try OCR fallback, but
+also requires confirmation when a reference library is active. The older
+no-reference mode retains its legacy automatic-registration policy.
+
+Reference pictures and their manifest live under
+`data/physical/cards/references/` (ignored by Git). Imports are explicit,
+background, throttled, incremental and bounded to 150 unique input rows / 600
+reference faces. The library loads on restart and visual scans work offline.
+Use a separate `--data-dir` for another library. Importing requires Scryfall
+access. Network errors are reported, not replaced with demo cards. OCR rescue
+requires the separate OS `tesseract-ocr` package; artwork matching does not.
+
+**Limitations:** this is a deck-sized local reference matcher, not a whole-Magic
+recognition service or demonstrated SpellTable/Convoke equivalent. Different art,
+heavy sleeves/glare, motion blur, very small cards, extensive occlusion and
+unusual layouts can fail. Automated tests use procedural art with perspective,
+rotation, exposure, blur, negative examples and multiple copies; they do not
+establish accuracy on physical-camera footage. A separate smoke check using a
+real Gitrog reference with digital perspective/rotation/exposure/blur also passed
+at four rotations; this is still not a webcam benchmark. Browser live mode currently
+identifies cards; the server-owned camera watcher remains the continuous
+movement/tap-observation path. Forge must still be connected for its rules/AI;
+recognition alone does not implement a complete paper Magic rules engine.
+
+Validation commands (network-free; Node is optional for the UI smoke test):
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+node tests/ui_scanner_smoke.cjs
+```
+
+### Experimental neural recognition (legacy path)
+
+The following describes the older optional index, not the recommended deck scanner.
+It requires suitable real images and a trained/calibrated model for useful accuracy.
+The default UI no longer seeds fictional demo cards.
+
 
 Cards are recognised from pixels — no per-card registration, no OCR-first
 pipeline, and no requirement to flatten the card:
@@ -306,60 +380,47 @@ expensive recognition pass can never make the preview choppy or stale. The 🐞
 debug panel shows all three rates; if the preview is choppy while capture is
 at the device rate, the bottleneck is the encode, not the camera.
 
-### Forge owns the rules (physical → Forge mirror)
+### Commander pod: experimental assisted prototype
 
-The camera side observes; it never judges. Every physical fact that survives
-reconciliation is forwarded to the running Forge game, which remains the only
-rules engine in the system:
+Open **`/play`** on the physical-table server for the new four-seat view.
+**Not yet verified against a running Forge installation. Not a complete manual
+paper Commander game.** The Python gateway/UI are tested; Java compilation and
+end-to-end game tests are still required.
 
-```
-camera → detection → rectification → recognition/tracking
-       → physical event (card put down / turned sideways / moved zone /
-         +1/+1 counter / life changed / attacked with)
-       → flycommander/forge_table_bridge.py   (translate, spool, retry)
-       → POST /table/events  →  forge_patch/src/fly/agent  →  Forge
-       → Forge validates it, updates the real game state
-       → the fly seats and the UI read that state back (GET /observation)
-```
+The table seat now waits for keep/mulligan, approval of AI-proposed plays, and
+pass-priority decisions. Stock Forge AI still selects targets, modes, X, mana,
+combat, discards, replacement effects and other micro decisions. Combat delegation
+requires acknowledgement. There is no arbitrary card/ability picker yet; an empty
+AI proposal does **not** mean there are no legal plays. Selectable fly opponents
+remain future work.
 
-| Piece | Where |
-| --- | --- |
-| Event → action mapping | `flycommander/forge_table_bridge.py` (`EVENT_TO_ACTION`) |
-| Wire contract | `POST /table/events`, `POST /table/state`, `GET /table/queue` |
-| Forge side | `forge_patch/src/fly/agent/{AgentServer,TableActionQueue,TableActionApplier,PhysicalTableController,TableLobbyPlayer,ForgeApi}.java` |
-| UI panel | the **forge** line under the camera (`GET /api/forge/status`, *Sync to Forge*) |
-
-Properties of the link, all covered by `tests/test_forge_bridge.py`:
-
-- **No event can fall on the floor.** Every event type in `physical/events.py`
-  is either mapped to a Forge action or explicitly listed as tracking-only,
-  and the test suite enforces that partition.
-- **Never raises, never stalls the table.** Forge may simply not be running:
-  actions spool in order (bounded, with a drop counter) and flush on the next
-  successful contact. `FLYCOMMANDER_FORGE_SYNC=0` disables the mirror;
-  `FLYCOMMANDER_FORGE_AGENT` points at a non-default agent.
-- **Idempotent.** Actions carry `actionId = <tableId>:<seq>`; Forge ignores an
-  id it has already seen, so a retried batch cannot double-apply.
-- **Honest.** Forge's verdict per action (`applied` / `rejected` + reason) is
-  reported back and shown in the UI; the bridge never claims a game action
-  happened because the camera saw something.
-- **Forge stays the judge.** Applying an action means asking Forge to perform
-  it (`moveTo`, `setTapped`, `addCounter`, `setLife`); an illegal physical move
-  is refused by Forge with a reason, not silently accepted.
-
-Run the table with a physical seat in Forge:
+Forge owns shuffle, draws and hand identity. Use a matching paper deck and retrieve
+the cards shown in your hand; do not shuffle/draw independently. Scanner imports
+are artwork references, not Forge game decks. Opponent hands/library identities
+are not included in human snapshots. Prompts use single-use IDs; disconnects do
+not auto-pass or spool game decisions. This is a local/trusted-user interface,
+not an authenticated multiplayer room: anyone with access can answer prompts.
 
 ```bash
-make compile                       # javac the patch against your Forge jar
-java -Dfly.agent.table=1 -cp "$PATCH_CLASSES:$FORGE_JAR" fly.agent.AgentMain 1 random random random random
-.venv/bin/python scripts/physical_table.py --port 8795   # same machine
+# Terminal 1: requires an extracted Forge 2.0.15 distribution and a full JDK
+python scripts/run_paper_game.py --forge-dir /path/to/forge \
+  --human-deck /path/to/your-deck.dck \
+  --ai-deck /path/to/opponent1.dck \
+  --ai-deck /path/to/opponent2.dck \
+  --ai-deck /path/to/opponent3.dck --experimental-assisted
+# Terminal 2: open /play on this server
+.venv/bin/python scripts/physical_table.py --no-camera --port 8795
 ```
 
-> **Compile status:** the table-action endpoints and the applier are written
-> against the Forge 2.0.15 API surface, but this repository's CI has no Java or
-> Forge jar, so only the Python half is test-verified here. Run `make compile`;
-> all Forge API assumptions are gathered in
-> `forge_patch/src/fly/agent/ForgeApi.java` so a version bump is a one-file fix.
+Launcher compiles before starting and fails on missing prerequisites. Set
+`FLYCOMMANDER_AGENT_URL` on the Python server for a non-default agent URL.
+The browser uses same-origin `/api/game` and `/api/game/decision` routes.
+
+**Correction to the old mirror documentation:** direct `moveTo`, `setTapped`,
+`addCounter`, and `setLife` calls are state edits, not legal casting/cost payment.
+The agent now rejects `/table/events` and `/table/state` with HTTP 410. Legacy
+Python mirror code remains for compatibility tests, but cannot change this game.
+A scanner confirmation only records identity in the scanner workspace.
 
 Architecture (all under [physical/](physical/)):
 

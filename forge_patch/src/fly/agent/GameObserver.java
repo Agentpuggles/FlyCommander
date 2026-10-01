@@ -24,7 +24,7 @@ public final class GameObserver {
         StringBuilder sb = new StringBuilder(8192);
         sb.append('{');
         putInt(sb, "turn", game.getPhaseHandler().getTurn());
-        putStr(sb, "phase", game.getPhaseHandler().getPhase().name());
+        putStr(sb, "phase", (game.getPhaseHandler().getPhase() == null ? "PREGAME" : game.getPhaseHandler().getPhase().name()));
         putBool(sb, "gameOver", game.isGameOver());
 
         // --- players -------------------------------------------------
@@ -71,7 +71,7 @@ public final class GameObserver {
             sb.append(']');
             sb.append('}');
         }
-        sb.append(']');
+        sb.append("],");
 
         // --- stack + combat ------------------------------------------
         sb.append("\"stackSize\":").append(game.getStack().size()).append(',');
@@ -110,11 +110,12 @@ public final class GameObserver {
                 hasAbility = true;
             }
         }
+        sb.append("\"canPlay\":{");
         putBool(sb, "land", hasLand);
         putBool(sb, "spell", hasSpell);
         putBool(sb, "ability", hasAbility);
         sb.setLength(sb.length() - 1); // trailing comma from putBool
-        sb.append(']');
+        sb.append('}');
 
         sb.append('}');
         return sb.toString();

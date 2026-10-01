@@ -27,13 +27,19 @@ public class FlyPlayerController extends PlayerControllerAi {
     public static final int ACT_INTERACT = 3;  // AI's removal/interaction pick
 
     private final Player me;
+    private final String brainUrl;
     private String lastDecisionKey = "";
     private int decisionsThisPhase = 0;
     private static final int MAX_DECISIONS_PER_PHASE = 8;
 
     public FlyPlayerController(Game game, Player player, forge.LobbyPlayer lobbyPlayer) {
+        this(game, player, lobbyPlayer, null);
+    }
+
+    public FlyPlayerController(Game game, Player player, forge.LobbyPlayer lobbyPlayer, String brainUrl) {
         super(game, player, lobbyPlayer);
         this.me = player;
+        this.brainUrl = brainUrl;
         // Heuristics only — full/hybrid simulation is far too slow at every
         // priority pass. The fly plays fast, if imperfect.
         try {
@@ -49,6 +55,8 @@ public class FlyPlayerController extends PlayerControllerAi {
      */
     @Override
     public java.util.List<SpellAbility> chooseSpellAbilityToPlay() {
+        // Forge 2.0.15 uses null for pass, NOT an empty ability list. Returning
+        // [] would keep this AI in PhaseHandler's action loop until its limit.
         // Gate: the brain only decides on the fly's own main phases. Everything
         // else (instants on others' turns, triggers, combat priority) passes
         // through instantly — a documented v1 limitation.
@@ -61,16 +69,17 @@ public class FlyPlayerController extends PlayerControllerAi {
         }
         if (!myMain || decisionsThisPhase >= MAX_DECISIONS_PER_PHASE
                 || getGame().isGameOver()) {
-            return java.util.List.of();
+            return null;
         }
         decisionsThisPhase++;
 
         // Snapshot for the brain (cheap, best-effort)
         AgentServer.pushObservation(GameObserver.snapshotJson(getGame(), me));
 
-        int choice = BrainClient.queryAction(
-                AgentServer.lastObservationJson(),
-                System.getProperty("fly.agent.decisionContext", ""));
+        String observation = GameObserver.snapshotJson(getGame(), me);
+        String context = System.getProperty("fly.agent.decisionContext", "");
+        int choice = brainUrl == null ? BrainClient.queryAction(observation, context)
+                : BrainClient.queryAction(brainUrl, observation, context);
         AgentServer.recordDecision(choice);
 
         switch (choice) {
@@ -81,7 +90,7 @@ public class FlyPlayerController extends PlayerControllerAi {
                     return java.util.List.of(best);
                 }
                 AgentServer.recordAction("play:none");
-                return java.util.List.of(); // nothing worth playing → hold
+                return null; // nothing worth playing → hold
             }
             case ACT_INTERACT: {
                 SpellAbility sa = pickBestSa(true);
@@ -90,16 +99,16 @@ public class FlyPlayerController extends PlayerControllerAi {
                     return java.util.List.of(sa);
                 }
                 AgentServer.recordAction("interact:none");
-                return java.util.List.of();
+                return null;
             }
             case ACT_ATTACK:
                 // handled in declareAttackers(); pass priority for now
                 AgentServer.recordAction("attack:deferred");
-                return java.util.List.of();
+                return null;
             case ACT_HOLD:
             default:
                 AgentServer.recordAction("hold");
-                return java.util.List.of();
+                return null;
         }
     }
 

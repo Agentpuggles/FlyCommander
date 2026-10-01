@@ -76,7 +76,7 @@ final class TableActionApplier {
             String key = action.str("cardKey");
             String name = action.str("name");
             if (ForgeApi.isToken(action.fields) && name != null) {
-                card = ForgeApi.cardByName(name, seat);
+                return "Token creation requires a Forge token effect, not a name-only paper-card lookup";
             }
             if (card == null) {
                 return "card not found in hand or library: "
@@ -98,7 +98,7 @@ final class TableActionApplier {
             for (Map.Entry<String, Object> e : counters.entrySet()) {
                 int amount = e.getValue() instanceof Number
                         ? ((Number) e.getValue()).intValue() : 1;
-                reason = ForgeApi.addCounter(card, e.getKey(), amount);
+                reason = ForgeApi.addCounter(seat, card, e.getKey(), amount, null);
                 if (reason != null) {
                     return reason;
                 }
@@ -130,7 +130,7 @@ final class TableActionApplier {
         }
         String name = action.str("counter");
         int amount = action.intValue("amount", 1);
-        return ForgeApi.addCounter(card, name, amount);
+        return ForgeApi.addCounter(seat, card, name, amount, null);
     }
 
     private static String setLife(Player seat, TableActionQueue.Action action) {
@@ -154,12 +154,10 @@ final class TableActionApplier {
     }
 
     private static String markDamage(Player seat, TableActionQueue.Action action) {
-        Card card = resolve(seat, action, true);
-        if (card == null) {
-            return "permanent not on the battlefield: " + describe(action);
-        }
-        return ForgeApi.markDamage(seat, card, action.intValue("amount", 1),
-                action.bool("deathtouch", false));
+        // This legacy payload has only a target, amount and deathtouch boolean.
+        // It cannot identify a source LKI, cause or simultaneous damage batch.
+        // Guessing these would bypass replacement/prevention and damage history.
+        return "Source-less mark_damage is unsupported; resolve damage through the Forge spell/combat effect";
     }
 
     /**
@@ -234,10 +232,12 @@ final class TableActionApplier {
             number = key.substring(i + 1);
         }
         for (Card card : candidates(seat, battlefieldOnly)) {
-            if (set != null && number != null
-                    && set.equalsIgnoreCase(String.valueOf(card.getSetCode()))
-                    && number.equals(String.valueOf(card.getCollectorNumberId()))) {
-                return card;
+            if (set != null && number != null) {
+                forge.item.IPaperCard paper = card.getPaperCard();
+                if (paper != null && set.equalsIgnoreCase(paper.getEdition())
+                        && number.equals(paper.getCollectorNumber())) return card;
+                // A requested printing must never fall back to a same-name card.
+                continue;
             }
             if (name != null && name.equalsIgnoreCase(card.getName())) {
                 return card;

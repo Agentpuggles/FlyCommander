@@ -1,0 +1,22 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const elements=new Map();
+function el(id){ if(!elements.has(id)) elements.set(id,{innerHTML:'',textContent:'',style:{},checked:false,disabled:false,files:[],value:'',removeAttribute(){},appendChild(){},after(){}});return elements.get(id); }
+const context={console,document:{addEventListener(){},getElementById:el,createElement:()=>({style:{}})},window:{addEventListener(){}},navigator:{},setTimeout(){},clearTimeout(){},setInterval(){},fetch(){throw Error('unexpected network')}};
+vm.createContext(context);
+let script=fs.readFileSync('physical/ui.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
+script=script.replace('ensureCam();\n','').replace('refresh();\nsetInterval(refresh, 2500);','');
+vm.runInContext(script,context);
+context.choice={name:`Gitrog's <Monster> & Friends`,set:'soi',collectorNumber:'245',source:'reference-art',confidence:.96,scores:{artInliers:55},imagePath:'x/0123456789abcdef01234567.jpg'};
+vm.runInContext('renderRecognised({status:"ok",cards:[{trackId:"c1",cardImage:null,match:{unknown:false,candidates:[choice]}}]})',context);
+let html=el('recognisedBox').innerHTML;
+assert(html.includes('ARTWORK MATCHED')&&html.includes('Add to battlefield'));
+assert(html.includes('&lt;Monster&gt;')&&!html.includes('<Monster>'));
+let handler=html.match(/onclick='([^']+)'/)[1];
+handler=handler.replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&');
+context.confirmRecognition=p=>{context.parsed=JSON.parse(p)};
+vm.runInContext(handler,context);
+assert.equal(context.parsed.name,context.choice.name);
+vm.runInContext('renderScan({status:"ok",pipeline:"reference-art",candidates:[choice],evidence:{source:"reference-art",nameRaw:choice.name},registered:null})',context);
+assert(el('scanResult').innerHTML.includes('CONFIRM CARD'));
+assert(!el('scanResult').innerHTML.includes('96%'));
+console.log('UI smoke: render, escaping, confirmation payload, artwork evidence labels: PASS');

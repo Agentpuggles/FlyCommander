@@ -231,6 +231,8 @@ class CardRecognizer:
         self.last_scene: SceneAnalysis | None = None
         self.recognition_log: deque = deque(maxlen=50)
         self.auto_registered: dict[str, str] = {}     # stable_key -> tracking id
+        from vision.reference_scanner import ReferenceScanner
+        self.reference_scanner = ReferenceScanner(Path(self.config.index_dir) / "references")
         self.load_index()
 
     # ------------------------------------------------------------------
@@ -272,12 +274,13 @@ class CardRecognizer:
 
     @property
     def ready(self) -> bool:
-        return self.matcher is not None and self.matcher.ready
+        return self.reference_scanner.ready or (self.matcher is not None and self.matcher.ready)
 
     def status(self) -> dict[str, Any]:
         index = self.matcher.index if self.matcher else None
         return {
-            "pipeline": "neural",
+            "pipeline": "reference-art" if self.reference_scanner.ready else "neural",
+            "referenceScanner": self.reference_scanner.status(),
             "ready": self.ready,
             "indexSize": index.size if index else 0,
             "indexDir": self.config.index_dir,
@@ -333,7 +336,9 @@ class CardRecognizer:
         track.match = match
         track.frames_seen += 1
         track.last_seen = time.time()
-        if match.best is not None:
+        if match.unknown:
+            track.votes.clear()
+        if match.best is not None and not match.unknown:
             track.votes.append((match.best.key, match.best.name,
                                 match.best.confidence,
                                 match.best.confidence >= 0.5))
@@ -392,13 +397,15 @@ class CardRecognizer:
         a fast presence/tap pass when the index is empty or the CPU is busy).
         """
         t_start = time.time()
-        scene = SceneAnalysis(frame_shape=frame.shape[:2],
+        scene = SceneAnalysis(frame_shape=frame.shape[:2] if frame is not None else (0, 0),
                               index_size=self.matcher.index.size if self.matcher else 0)
         if not CV_AVAILABLE or frame is None or frame.size == 0:
             scene.notes.append("no frame")
             return scene
 
         max_cards = max_cards or self.config.max_cards_per_frame
+        if match_cards and self.reference_scanner.ready:
+            return self._recognize_references(frame, max_cards, stabilise)
         detections = self.detector.detect(frame)
         if len(detections) > max_cards:
             detections = sorted(detections, key=lambda d: -d.confidence)[:max_cards]
@@ -447,7 +454,7 @@ class CardRecognizer:
                                            detection=det, frames_seen=0)
                     self.tracks[track.track_id] = track
                 match = (self.matcher.match_rectified(rect)
-                         if (match_cards and self.ready) else MatchResult(
+                         if (match_cards and self.matcher and self.matcher.ready) else MatchResult(
                              notes=["no index — detection only"]))
                 track.detection = det
                 self._update_track(track, rect, match)
@@ -483,11 +490,39 @@ class CardRecognizer:
             })
         return scene
 
+    def _recognize_references(self, frame, max_cards, stabilise):
+        """Real reference matching owns this mode; never fall through to demo guesses."""
+        t0 = time.time()
+        hits = self.reference_scanner.recognize(frame, max_cards)
+        scene = SceneAnalysis(frame_shape=frame.shape[:2], pipeline="reference-art",
+                              index_size=len(self.reference_scanner.refs))
+        with self._lock:
+            used = set()
+            for hit in hits:
+                rect = R.rectify(frame, hit.quad, refine=False)
+                track = self._associate(rect)[0] if stabilise else None
+                if track is None or track.track_id in used:
+                    track = RecognizedCard(self._new_track_id(), rect, hit.match, frames_seen=0)
+                    self.tracks[track.track_id] = track
+                self._update_track(track, rect, hit.match)
+                used.add(track.track_id)
+                scene.cards.append(track)
+            self._retire_stale(time.time())
+        scene.timings = {"totalMs": (time.time() - t0) * 1000}
+        scene.notes = ["Local artwork matching; confirm before adding to battlefield."]
+        if not hits:
+            scene.notes.append("No artwork verified. Import this printing, move closer, or try Scan for OCR.")
+        self.last_scene = scene
+        return scene
+
     # ------------------------------------------------------------------
     def recognize_card_image(self, card: np.ndarray, top_k: int = 5) -> MatchResult:
         """Identify a single, already-rectified card image (manual/UI path)."""
         if not self.ready:
             return MatchResult(notes=["recognition index is empty"])
+        if self.reference_scanner.ready:
+            hits = self.reference_scanner.recognize(card, 1)
+            return hits[0].match if hits else MatchResult(notes=["No reference artwork verified"])
         assert self.matcher is not None
         return self.matcher.match(card, k=top_k)
 
