@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Magic Fly — Physical Table</title>
+<style>
+  :root { --bg:#12141a; --panel:#1b1f2a; --line:#2c3242; --fly:#7fd4ff;
+          --you:#ffd479; --good:#7be3a0; --bad:#ff7f7f; --text:#e8ecf4; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text);
+         font:14px/1.45 system-ui, sans-serif; height:100vh;
+         display:grid; grid-template-rows:56px 1fr 210px 150px; }
+  header { display:flex; align-items:center; gap:18px; padding:0 16px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; letter-spacing:.12em; }
+  .life { display:flex; align-items:center; gap:6px; }
+  .life b { font-size:20px; min-width:44px; text-align:center; }
+  .life.fly b { color:var(--fly); } .life.you b { color:var(--you); }
+  button { background:#2a3142; color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:4px 9px; cursor:pointer; }
+  button:hover { background:#38415a; }
+  button.primary { background:#2f6f4f; border-color:#3f8f66; }
+  #turnInfo { margin-left:auto; color:#9aa4b8; }
+  main { display:grid; grid-template-columns:1.15fr 1fr; gap:10px; padding:10px; min-height:0; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:10px; overflow:auto; min-height:0; }
+  .panel h2 { font-size:12px; letter-spacing:.14em; color:#9aa4b8; margin-bottom:8px; }
+  #flyBoard .card, #yourBoard .card { display:inline-block; vertical-align:top;
+      background:#242a3a; border:1px solid var(--line); border-radius:8px;
+      padding:6px 8px; margin:3px; cursor:pointer; user-select:none; }
+  .card.tapped { transform:rotate(88deg); border-color:#c9a44a; }
+  .card .pt { color:#9fe0ff; font-weight:600; }
+  .card .counters { color:var(--good); font-size:11px; }
+  .card .sick { color:var(--bad); font-size:11px; }
+  .card.selected { outline:2px solid var(--fly); }
+  #camPanel video { width:100%; border-radius:8px; background:#000; max-height:46vh; }
+  #camPanel .row { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+  input, select { background:#202635; border:1px solid var(--line); color:var(--text);
+                  border-radius:6px; padding:4px 6px; }
+  #brainPanel { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; padding:10px; }
+  .score { display:flex; justify-content:space-between; padding:2px 6px; }
+  .score.win { background:#2f4f3f; border-radius:4px; }
+  #decisionBox { font-size:15px; font-weight:700; color:var(--fly); padding:6px; }
+  #eventLog { font-family:ui-monospace, monospace; font-size:12px; color:#c3cbd9;
+              overflow:auto; padding:10px; }
+  #actionPopup { position:fixed; display:none; z-index:10; background:var(--panel);
+                 border:1px solid var(--line); border-radius:8px; padding:8px;
+                 box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  #actionPopup button { display:block; width:100%; margin:2px 0; text-align:left; }
+  .pendingBox { background:#3a2f1b; border:1px solid #6f5a2a; border-radius:8px;
+                padding:6px 8px; margin-top:6px; }
+  #flyAnnounce { color:var(--fly); font-weight:700; font-size:16px; padding:4px 10px; }
+  .muted { color:#8a94a8; font-size:12px; }
+  #scanResult .box { background:#20304a; border:1px solid #3d5a8a; border-radius:8px;
+                     padding:8px; margin-top:8px; }
+  #scanResult .box.good { background:#1f3a2c; border-color:#3f8f66; }
+  #scanResult .box.bad { background:#3a2222; border-color:#8a4a4a; }
+  #scanResult .cand { display:flex; justify-content:space-between; gap:8px;
+                      align-items:center; padding:3px 0; }
+  #scanResult img { border-radius:6px; border:1px solid var(--line);
+                    max-width:110px; max-height:154px; vertical-align:top; }
+  #debugView img { max-width:220px; margin:4px; border-radius:6px;
+                   border:1px solid var(--line); }
+  #debugView .dbg { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; }
+  #debugOverlay { width:100%; border-radius:8px; border:1px solid var(--line);
+                  background:#000; margin-top:8px; }
+  .dbgState { font-weight:700; padding:3px 8px; border-radius:6px; display:inline-block; }
+  .dbgState.green { background:#1f3a2c; color:var(--good); }
+  .dbgState.yellow { background:#3a331b; color:var(--you); }
+  .dbgState.red { background:#3a2222; color:var(--bad); }
+  .dbgGrid { font-family:ui-monospace, monospace; font-size:12px; color:#c3cbd9;
+             white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MAGIC FLY</h1>
+  <div class="life fly">🪰 <b id="flyLife">40</b>
+    <button onclick="life('fly',-1)">−1</button><button onclick="life('fly',-5)">−5</button>
+    <button onclick="life('fly',5)">+5</button><button onclick="life('fly',1)">+1</button>
+  </div>
+  <div class="life you">🧑 <b id="youLife">40</b>
+    <button onclick="life('player',-1)">−1</button><button onclick="life('player',-5)">−5</button>
+    <button onclick="life('player',5)">+5</button><button onclick="life('player',1)">+1</button>
+  </div>
+  <div><button class="primary" onclick="post('event',{type:'turn_advanced',payload:{}})">Next turn</button></div>
+  <div id="turnInfo">turn 1 · main1</div>
+</header>
+
+<main>
+  <div class="panel" id="flyPanel">
+    <h2>FLY BOARD (public)</h2>
+    <div id="flyAnnounce"></div>
+    <div id="flyBoard"></div>
+    <p class="muted">Fly hand is hidden. Buttons: 🪰 decide · combat · pass</p>
+    <div class="row" style="display:flex;gap:6px;margin-top:8px">
+      <button class="primary" onclick="flyDecide()">🪰 FLY DECIDE</button>
+      <button onclick="post('event',{type:'combat_begin',payload:{}})">Begin combat</button>
+      <button onclick="post('event',{type:'combat_end',payload:{}})">End combat</button>
+    </div>
+  </div>
+
+  <div class="panel" id="camPanel">
+    <h2>YOUR BOARD (camera)</h2>
+    <img id="cam" alt="camera stream" style="width:100%;border-radius:8px;background:#000;display:block">
+    <div class="row">
+      <button class="primary" id="scanBtn" onclick="scanBurst()">📷 Scan card</button>
+      <input id="regSet" placeholder="set (FDN)" size="7">
+      <input id="regNum" placeholder="#216" size="6">
+      <button onclick="registerManual()">Manual</button>
+      <button onclick="post('event',{type:'token_created',payload:{tokenType:'Soldier',count:1,power:1,toughness:1}})">+Token</button>
+      <button onclick="toggleDebug()">🐞</button>
+    </div>
+    <div id="scanResult"></div>
+    <div id="debugView" style="display:none" class="muted">
+      <img id="debugOverlay" alt="annotated frame">
+      <div id="debugStateLine"></div>
+      <div id="debugDetail" class="dbgGrid"></div>
+    </div>
+    <div id="yourBoard" style="margin-top:8px"></div>
+    <div id="pendingBox"></div>
+  </div>
+</main>
+
+<section id="brainPanel" class="panel">
+  <div>
+    <h2>FLY DECISION</h2>
+    <div id="decisionBox">—</div>
+    <div id="decisionDetail" class="muted"></div>
+  </div>
+  <div>
+    <h2>ACTION SCORES</h2>
+    <div id="actionScores"></div>
+  </div>
+  <div>
+    <h2>BRAIN</h2>
+    <div id="brainStats" class="muted"></div>
+  </div>
+</section>
+
+<footer class="panel" id="eventLog"></footer>
+
+<div id="actionPopup"></div>
+
+<script>
+let selected = null;
+const API = "";
+
+async function refresh() {
+  const s = await (await fetch(API + "/api/state")).json();
+  document.getElementById("flyLife").textContent = s.state.players.fly.life;
+  document.getElementById("youLife").textContent = s.state.players.player.life;
+  document.getElementById("turnInfo").textContent =
+    `turn ${s.state.turn} · ${s.state.phase}`;
+  renderBoard("flyBoard", s.state.battlefield.filter(c => c.controller === "fly"));
+  renderBoard("yourBoard", s.state.battlefield.filter(c => c.controller === "player"));
+  renderPending(s.pending);
+  renderBrain(s);
+  const log = document.getElementById("eventLog");
+  log.innerHTML = s.events.map(e => e.replace(/&/g,"&amp;").replace(/</g,"&lt;")).join("<br>");
+}
+
+function renderBoard(id, cards) {
+  const el = document.getElementById(id);
+  el.innerHTML = "";
+  for (const c of cards) {
+    const d = document.createElement("div");
+    d.className = "card" + (c.tapped ? " tapped" : "") + (selected === c.trackingId ? " selected" : "");
+    d.innerHTML = `<div>${c.name}</div>` +
+      (c.power != null ? `<div class="pt">${c.power}/${c.toughness}</div>` : "") +
+      (Object.keys(c.counters||{}).length ? `<div class="counters">${JSON.stringify(c.counters)}</div>` : "") +
+      (c.summoningSick ? `<div class="sick">sick</div>` : "") +
+      (c.attacking ? `<div class="sick">⚔ attacking</div>` : "") +
+      (c.blocking ? `<div style="color:#9fe0ff;font-size:11px">🛡 blocking</div>` : "");
+    d.onclick = (ev) => { ev.stopPropagation(); showPopup(c, ev.clientX, ev.clientY); };
+    el.appendChild(d);
+  }
+}
+
+function renderPending(pending) {
+  const box = document.getElementById("pendingBox");
+  box.innerHTML = "";
+  for (const p of pending) {
+    const d = document.createElement("div");
+    d.className = "pendingBox";
+    d.innerHTML = `<b>vision:</b> ${p.type} <span class="muted">${JSON.stringify(p.payload)}</span> ` +
+      `<button onclick="post('pending/confirm',{index:${p.index}})">✓</button>` +
+      `<button onclick="post('pending/reject',{index:${p.index}})">✗</button>`;
+    box.appendChild(d);
+  }
+}
+
+function renderBrain(s) {
+  if (s.decision) {
+    document.getElementById("decisionBox").textContent =
+      s.decision.action.toUpperCase();
+    document.getElementById("decisionDetail").textContent =
+      JSON.stringify(s.decision.detail || {});
+    const scores = s.decision.actionScores || {};
+    const el = document.getElementById("actionScores");
+    const max = Math.max(...Object.values(scores).map(v => v ?? 0), 0.0001);
+    el.innerHTML = Object.entries(scores).map(([k, v]) =>
+      `<div class="score ${v === max ? 'win' : ''}"><span>${k}</span><span>${v ?? "—"}</span></div>`).join("");
+    if (s.decision.action === "ATTACK" && s.decision.detail?.attackers) {
+      document.getElementById("flyAnnounce").textContent =
+        `🪰 FLY ATTACKS: ${(s.decision.detail.attackers||[]).join(", ")} → ${s.decision.detail.target} for ${s.decision.detail.damage}`;
+    } else {
+      document.getElementById("flyAnnounce").textContent = `🪰 FLY: ${s.decision.action}`;
+    }
+  }
+  const b = s.brain || {};
+  document.getElementById("brainStats").innerHTML =
+    `KC active: ${b.kcActive ?? "—"} / ${b.kcTotal ?? "—"}<br>` +
+    `τ (exploration): ${b.temperature ?? "—"}<br>` +
+    `value baseline: ${b.valueBaseline ?? "—"}<br>` +
+    `mean synapse w: ${b.meanSynapticWeight ?? "—"}<br>` +
+    `strong synapses: ${b.strongSynapses ?? "—"}`;
+}
+
+async function post(path, body) {
+  const r = await fetch(API + "/api/" + path, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)});
+  hidePopup(); await refresh(); return r.json();
+}
+
+function life(player, delta) { post("event", {type:"life_changed", payload:{player, delta}}); }
+async function flyDecide() {
+  const r = await (await fetch(API + "/api/brain/decide", {method:"POST"})).json();
+  await refresh();
+}
+
+function showPopup(card, x, y) {
+  selected = card.trackingId;
+  const p = document.getElementById("actionPopup");
+  const tid = card.trackingId;
+  const acts = [
+    ["counter_added", "+1/+1 counter", {counter:"+1/+1", amount:1}],
+    ["counter_removed", "−1/+1 counter", {counter:"+1/+1", amount:1}],
+    ["card_tapped", "Tap", {}],
+    ["card_untapped", "Untap", {}],
+    ["ability_granted", "Give flying", {ability:"flying"}],
+    ["ability_removed", "Remove flying", {ability:"flying"}],
+    ["ability_granted", "Give haste", {ability:"haste"}],
+    ["ability_removed", "Remove haste", {ability:"haste"}],
+    ["temp_buff", "+2/+2 this turn", {power:2, toughness:2}],
+    ["temp_debuff", "−2/−2 this turn", {power:2, toughness:2}],
+    ["damage_marked", "Mark 1 damage", {amount:1}],
+    ["damage_cleared", "Clear damage", {}],
+    ["attack_declared", "⚔ Attack (target fly)", {target:"fly"}],
+    ["attack_retracted", "Retract attack", {}],
+    ["block_declared", "🛡 Block", {attacker:card.blockedBy||""}],
+    ["block_retracted", "Retract block", {}],
+    ["zone_change", "→ graveyard", {to:"graveyard"}],
+    ["zone_change", "→ exile", {to:"exile"}],
+    ["zone_change", "→ hand", {to:"hand"}],
+    ["token_removed", "Remove one token", {}],
+    ["entered_battlefield", "Re-ETB (reset sickness)", {}],
+  ];
+  p.innerHTML = `<div style="margin-bottom:4px"><b>${card.name}</b> <span class="muted">${tid}</span></div>`;
+  for (const [type, label, payload] of acts) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => post("event", {type, payload: {trackingId: tid, ...payload}});
+    p.appendChild(b);
+  }
+  p.style.display = "block";
+  p.style.left = Math.min(x, innerWidth - 240) + "px";
+  p.style.top = Math.min(y, innerHeight - 420) + "px";
+}
+function hidePopup() { document.getElementById("actionPopup").style.display = "none"; }
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#actionPopup") && !e.target.closest(".card")) hidePopup();
+});
+
+// --- camera: server-owned MJPEG stream (watcher holds /dev/video0) -----
+let camRetries = 0;
+function ensureCam() {
+  const v = document.getElementById("cam");
+  v.src = API + "/api/camera/stream?ts=" + Date.now();  // MJPEG in <img>
+  v.onerror = () => {
+    if (camRetries++ < 5) {
+      setTimeout(ensureCam, 1500);   // camera may still be starting
+      return;
+    }
+    document.getElementById("scanResult").innerHTML =
+      `<div class="box bad">camera stream unavailable — manual registration still works</div>`;
+  };
+  v.onload = () => { camRetries = 0; };
+}
+ensureCam();
+
+function esc(s) { return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+
+async function scanBurst() {
+  const btn = document.getElementById("scanBtn");
+  btn.disabled = true; btn.textContent = "Scanning…";
+  try {
+    // server samples its own burst from /dev/video0 and picks the sharpest
+    const r = await (await fetch(API + "/api/register/frame", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({})})).json();
+    renderScan(r);
+    await refresh();
+  } finally {
+    btn.disabled = false; btn.textContent = "📷 Scan card";
+  }
+}
+
+function renderScan(r) {
+  const el = document.getElementById("scanResult");
+  const dbg = document.getElementById("debugView");
+  const st = r.state || "";
+  const confLine = (r.card_detected != null)
+    ? `<span class="muted">state: ${esc(st || r.status)} · card_detected: ${r.card_detected}` +
+      `${r.confidence != null ? " · confidence " + r.confidence : ""}</span><br>` : "";
+  if (r.status === "error") {
+    el.innerHTML = `<div class="box bad">${esc(r.error)}</div>`;
+  } else if (st === "no_card" || st === "multiple_cards" ||
+             st === "too_small") {
+    // RED: nothing scannable — with a distinct, honest instruction
+    el.innerHTML = `<div class="box bad"><b>${esc(r.message)}</b><br>${confLine}` +
+      `<span class="muted">quality: ${JSON.stringify(r.quality || {})}</span></div>`;
+  } else if (st === "bad_angle") {
+    // YELLOW: a card IS detected — the perspective is just too steep.
+    // Actionable coaching, never a registration failure.
+    el.innerHTML = `<div class="box" style="background:#3a331b;border-color:#6f5a2a">` +
+      `<b>${esc(r.message || "Card detected but perspective too steep. Flatten card.")}</b><br>${confLine}` +
+      `<span class="muted">flatten the card toward the camera, then scan again</span></div>`;
+  } else if (st === "bad_quality") {
+    // YELLOW: card may exist but the frame is unusable
+    el.innerHTML = `<div class="box" style="background:#3a331b;border-color:#6f5a2a">` +
+      `<b>${esc(r.message)}</b><br>${confLine}` +
+      `<span class="muted">quality: ${JSON.stringify(r.quality || {})}</span></div>`;
+  } else if (st === "ocr_failed") {
+    // YELLOW: a real card is on the table but text is unreadable
+    el.innerHTML = `<div class="box" style="background:#3a331b;border-color:#6f5a2a">` +
+      `<b>${esc(r.message)}</b><br>${confLine}` +
+      `<span class="muted">try better light / steeper angle, then Retry Scan — or manual entry</span></div>`;
+  } else {
+    const ev = r.evidence || {};
+    const cand = r.candidates || [];
+    let html = `<div class="box ${r.registered ? 'good' : ''}">`;
+    if (r.registered) {
+      html += `<b>CARD DETECTED & REGISTERED</b><br><b style="font-size:16px">${esc(r.registered.name)}</b><br>`;
+      if (r.registered.duplicate) html += `<span class="muted">(already on battlefield — tracked)</span><br>`;
+    } else if (cand.length) {
+      html += `<b>WHICH CARD?</b>`;
+    } else {
+      html += `<b>Card seen, not identified</b> — better light or Retry Scan may help`;
+    }
+    html += confLine;
+    html += `<div class="muted">name OCR: “${esc(ev.nameRaw)}” ` +
+            `${ev.nameConfidence != null ? Math.round((ev.nameConfidence||0)*100) + "%" : ""} · ` +
+            `set: ${esc(ev.set) || "—"} · collector: ${esc(ev.collectorNumber) || "—"}</div>`;
+    if (!r.registered && cand.length) {
+      cand.forEach((c, i) => {
+        html += `<div class="cand"><span>${i + 1}. ${esc(c.name)} ` +
+                `<span class="muted">[${esc(c.set)} #${esc(c.collectorNumber)}] ` +
+                `${Math.round((c.combinedConfidence||0)*100)}%</span></span>` +
+                `<button onclick="registerCandidate(${i})">Select</button></div>`;
+      });
+    }
+    html += `</div>`;
+    el.innerHTML = html;
+  }
+  if (dbg.style.display !== "none") loadDebug();
+}
+
+async function registerCandidate(i) {
+  await post("register/candidate", {index: i});
+  document.getElementById("scanResult").innerHTML = "";
+}
+
+async function registerManual() {
+  const set = document.getElementById("regSet").value;
+  const num = document.getElementById("regNum").value;
+  if (!set || !num) { return; }
+  await post("register", {set, collectorNumber: num});
+}
+
+function toggleDebug() {
+  const d = document.getElementById("debugView");
+  d.style.display = d.style.display === "none" ? "block" : "none";
+  if (d.style.display === "block") loadDebug();
+}
+
+async function loadDebug() {
+  const d = document.getElementById("debugView");
+  // annotated live frame + analysis (always available while camera runs)
+  const ov = document.getElementById("debugOverlay");
+  ov.src = API + "/api/debug/frame?ts=" + Date.now();
+  let info = {};
+  try { info = await (await fetch(API + "/api/debug/info")).json(); }
+  catch (e) { /* keep going with scan-only debug */ }
+  const stateLine = document.getElementById("debugStateLine");
+  const detail = document.getElementById("debugDetail");
+  const a = info.analysis;
+  if (a) {
+    const cls = a.state === "card_detected" ? "green"
+      : a.state === "no_card" ? "red" : "yellow";
+    const persp = a.perspective && a.perspective !== "unknown"
+      ? ` · perspective: ${a.perspective}` : "";
+    stateLine.innerHTML = `<span class="dbgState ${cls}">${esc(a.state)}</span> ` +
+      `<span class="muted">conf ${a.confidence}${persp} — ${esc(a.reason)}</span>`;
+  } else {
+    stateLine.innerHTML = `<span class="dbgState red">no analysis yet</span>`;
+  }
+  const cam = info.camera || {};
+  const diag = info.diagnostics || {};
+  const stats = info.cameraStats || {};
+  const t = info.timings || {};
+  const measured = diag.measuredFps ?? (a && a.camera ? a.camera.measuredFps : null);
+  let txt =
+    `camera owner: camera-watcher (single V4L2 capture loop)\n` +
+    `camera: ${cam.camera_device || "?"} · ${diag.format || "?"} ` +
+    `${diag.width || "?"}x${diag.height || "?"} @${diag.fps || "?"} fps` +
+    ` (measured ${measured != null ? Number(measured).toFixed(1) : "—"})\n` +
+    `requested: ${JSON.stringify(diag.requested || {})}\n` +
+    `frames: ${stats.frames ?? 0} · cardsSeen: ${stats.cardsSeen ?? 0}` +
+    ` · grabFailures: ${stats.grabFailures ?? 0} · stallEvents: ${stats.stallEvents ?? 0}` +
+    ` · lastError: ${stats.lastError || "none"}\n` +
+    `loop ms: ${JSON.stringify(t.watcherLoop || {})}\n` +
+    `scan ms: ${JSON.stringify(t.lastScan || {})}\n`;
+  if (a && a.candidates) {
+    for (const c of a.candidates) {
+      txt += `candidate: conf ${c.confidence} · aspect ${c.aspect} ` +
+             `(MTG 0.716) · tilt ${c.tiltDeg}° · area ${(c.areaFrac*100).toFixed(1)}%\n` +
+             `  reasons: ${c.reasons.join("; ")}\n`;
+    }
+  }
+  detail.textContent = txt;
+
+  // per-scan detail: rectified (perspective-corrected) card, OCR crops, and
+  // the candidate list with the full confidence breakdown (OCR + artwork)
+  const s = info.lastScan;
+  if (!s) return;
+  const o = s.ocr || {};
+  const cands = (s.analysis && s.analysis.candidates) || [];
+  const ev = s.evidence || {};
+  let candHtml = "";
+  for (const c of (info.lastCandidates || [])) {
+    candHtml +=
+      `<div class="dbg">` +
+      `<b>${esc(c.name)}</b> · ${esc(c.set)} #${esc(c.collectorNumber)}` +
+      ` — combined ${(c.combinedConfidence * 100).toFixed(0)}%` +
+      ` · name ${esc(String(c.nameMatch))} · art ${esc(String(c.visualScore))}` +
+      (c.imageUri ? `<br><img src="${esc(c.imageUri)}" style="width:90px">` : "") +
+      `</div>`;
+  }
+  const div = document.createElement("div");
+  div.className = "dbg";
+  div.style.marginTop = "8px";
+  div.innerHTML =
+    `<div><b>rectified card (perspective ${esc(s.perspective || "?")})</b><br>` +
+    (s.rectifiedCard ? `<img src="${s.rectifiedCard}">` : `<i>unavailable</i>`) + `</div>` +
+    `<div><b>name crop</b><br>` +
+    (s.nameCrop ? `<img src="${s.nameCrop}">` : "") +
+    `raw: “${esc(o.name?.raw)}” · conf: ${o.name?.confidence}</div>` +
+    `<div><b>collector crop</b><br>` +
+    (s.collectorCrop ? `<img src="${s.collectorCrop}">` : "") +
+    `raw: “${esc(o.collector?.raw)}” → set ${esc(o.collector?.set)} #${esc(o.collector?.number)}</div>` +
+    `<div>evidence: name ${ev.nameConfidence} · collector ${ev.collectorConfidence}` +
+    ` · visual ${ev.visualScore} · frameQ ${ev.frameQuality}</div>` +
+    `<div>frame #${s.frameIndex}/${s.framesReceived} · q ${JSON.stringify(s.frameQuality?.score)}` +
+    ` · orientation: ${s.cardOrientation}° · scan ms: ${JSON.stringify(info.timings?.lastScan || {})}</div>` +
+    candHtml;
+  detail.after(div);
+}
+
+refresh();
+setInterval(refresh, 2500);
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# FlyCommander — hard requirements
+numpy>=1.26
+pytest>=8.0
+
+# Optional / future layers
+# ultralytics>=8.2      # YOLOv8 card detector training (vision/)
+# opencv-python>=4.9    # perception, ArUco zones, dewarp (vision/)
+# torch>=2.2            # CLIP/DINOv2 card embeddings (vision/)
+# brian2>=2.5           # alternative spiking simulator backend

@@ -1,0 +1,29 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+
+# AI/model files
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Data/cache
+data/
+*.json
+*.sqlite
+*.db
+
+# OS
+.DS_Store
+.idea/
+.vscode/

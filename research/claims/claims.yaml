@@ -1,0 +1,471 @@
+# Claims Database
+# Every scientifically/technically important claim, traceable to evidence.
+# Conventions: confidence HIGH/MED/LOW; source_type: primary|official|code|secondary|dataset
+# implementation_status: implemented|partial|absent|conflicts
+# YAML list-of-maps; see research/README.md for conventions.
+
+claims:
+  # ---------------- Magic rules ----------------
+  - id: MGC-001
+    claim: "Commander games start at 40 life; poison counters kill at 10 (903.10a covers commander damage only)."
+    domain: magic
+    source: "MTG Comprehensive Rules, effective 2025-06-06 (local copy /tmp/mtgrules.txt)"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [flycommander/sensory_encoder.py, flycommander/reward_shaping.py]
+    validation_needed: "re-check rules version after each set release"
+    notes: "Encoder normalizes life by 40 and poison by 10 — matches RC rules."
+
+  - id: MGC-002
+    claim: "A player loses on reaching 21 or more commander damage from one commander (903.10a)."
+    domain: magic
+    source: "MTG Comprehensive Rules 903.10a, effective 2025-06-06"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [flycommander/sensory_encoder.py]
+    validation_needed: no
+    notes: "Encoder tracks per-seat commander damage /40. Duel Commander has removed this rule — do not port Duel rules."
+
+  - id: MGC-003
+    claim: "Continuous effects apply in 7 layers (613.1a–g); power/toughness effects subordered 613.3c–f, counters apply last (613.3f→g)."
+    domain: magic
+    source: "MTG Comprehensive Rules 613, effective 2025-06-06"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: absent
+    affected_files: [flycommander/sensory_encoder.py]
+    validation_needed: "yes — any future board representation"
+    notes: "Encoder sees only creature/land counts; no P/T, no layers, no timestamps. Any future board model must include a timestamp/layer-aware model or accept the gap."
+
+  - id: MGC-004
+    claim: "State-based actions are checked whenever a player gains priority (704.3) and executed until none apply (704.5a–z list)."
+    domain: magic
+    source: "MTG Comprehensive Rules 704, effective 2025-06-06"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: absent
+    affected_files: []
+    validation_needed: no
+    notes: "Forge handles SBAs; fly never sees SBA events, only post-SBA counts."
+
+  - id: MGC-005
+    claim: "Attack legality includes restrictions and requirements; attackers declared simultaneously (509.1), combat damage assigned simultaneously (510.1)."
+    domain: magic
+    source: "MTG Comprehensive Rules 508–510, effective 2025-06-06"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [forge_patch/src/fly/agent/FlyPlayerController.java]
+    validation_needed: no
+    notes: "Fly declares attackers as a set via Forge-proposed candidates; Forge validates legality."
+
+  - id: MGC-006
+    claim: "Commander format rules: 100-card singleton, color identity, commander tax +{2} per prior cast (903.8c), commander replacement effect (903.9)."
+    domain: magic
+    source: "MTG Comprehensive Rules 903, effective 2025-06-06"
+    source_type: official
+    version: "2025-06-06"
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [flycommander/sensory_encoder.py]
+    validation_needed: no
+    notes: "Encoder has commandZone count channel but no tax counter channel — fly cannot represent 'how many times has my commander been cast' explicitly except via command-zone/lib/gy composition."
+
+  # ---------------- Forge ----------------
+  - id: FRG-001
+    claim: "FlyPlayerController overrides only chooseSpellAbilityToPlay and declareAttackers; all other decisions (targets, blockers, damage assignment, mana, triggers, instants, mulligans) remain with Forge AI."
+    domain: forge
+    source: "Bytecode inspection (javap -c) of fly.agent.FlyPlayerController in patched jar + source"
+    source_type: code
+    version: "Forge 2.0.15"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [forge_patch/src/fly/agent/FlyPlayerController.java]
+    validation_needed: "re-verify after any Forge upgrade"
+    notes: "Documented confound: fly's reward signal includes outcomes of Forge-AI decisions."
+
+  - id: FRG-002
+    claim: "Fly spell decisions occur only in own main phases, max 8 per phase; everything else delegates up to Forge AI."
+    domain: forge
+    source: "fly.agent.FlyPlayerController source + bytecode"
+    source_type: code
+    version: "Forge 2.0.15"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [forge_patch/src/fly/agent/FlyPlayerController.java]
+    validation_needed: no
+    notes: "Instant-speed interaction is unreachable in fly's action space; 'interact' action only picks Forge's proposed removal."
+
+  - id: FRG-003
+    claim: "Forge boot path is AgentMain → FModel.initialize → DeckResolver → GameObserver → AgentServer → match; FModel.initialize dominates JVM startup (tens of seconds)."
+    domain: forge
+    source: "javap -c disassembly of fly.agent.AgentMain; logs/java.log timings"
+    source_type: code
+    version: "Forge 2.0.15"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [forge_patch/src/fly/agent/AgentMain.java]
+    validation_needed: no
+    notes: "JVM amortization is why training runs many games per JVM."
+
+  - id: FRG-004
+    claim: "Forge shuffling uses forge.util.MyRandom; patched path does not pin per-game seeds — Java-side game randomness is not currently reproducible."
+    domain: forge
+    source: "javap -c of forge.util.MyRandom usage; AgentMain boot code"
+    source_type: code
+    version: "Forge 2.0.15"
+    confidence: MED   # exact seeding semantics not fully traced
+    implementation_status: absent
+    affected_files: [forge_patch/src/fly/agent/AgentMain.java]
+    validation_needed: "yes — pin MyRandom seed per game for reproducible experiments"
+    notes: "Python-side RNGs are seeded (2049). Mixed determinism."
+
+  - id: FRG-005
+    claim: "Forge AI is hand-written heuristics (SpellAbilityChooser, CardEvaluator, combat classes); no search or learning in stock AI."
+    domain: forge
+    source: "Forge docs/AI.md + class listing in 2.0.15 jar"
+    source_type: official
+    version: "Forge 2.0.15"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: []
+    validation_needed: no
+    notes: "Fly's candidate menus are heuristic products; fly inherits Forge AI's strategic ceiling."
+
+  # ---------------- Neuroscience ----------------
+  - id: NEU-001
+    claim: "Adult Drosophila MB has ~2,000 KCs, 34 MBONs (21 cell types), ~130 DANs (20 types); PN→KC connectivity is ~7 claws per KC."
+    domain: neuroscience
+    source: "Aso et al. 2014, Cell 157(3):e-data; PMC8975552 (Gkanias 2022) re-check"
+    source_type: primary
+    version: "Aso 2014"
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: [brain/connectome.py]
+    validation_needed: "decide: scale to biology or rename as bio-inspired"
+    notes: "Project: 4064 KCs / 97 MBONs / 344 DANs — these are MaleCNS whole-CNS counts, not adult MB counts. Encoder itself uses 64 PN channels, fewer than Aso's ~150 glomeruli PN types."
+
+  - id: NEU-002
+    claim: "Gkanias et al. 2022 (eLife, PMC8975552) 'incentive circuit' DPR is NOT reward prediction error; it maximizes separation of reinforced inputs via 4 synaptic effects (depression/potentiation/recovery/saturation)."
+    domain: neuroscience
+    source: "Gkanias, Ruta, Randuniene, Chittka 2022, eLife 11:e75611 / PMC8975552"
+    source_type: primary
+    version: "2022"
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: [brain/dopamine_plasticity.py]
+    validation_needed: "relabel the rule in docs or implement actual DPR"
+    notes: "Project's DPR is a simplified dopamine-gated Hebbian rule (lr 0.01, delta = lr·outer(active KC, dan_gate)); naming it 'DPR' overstates fidelity to the cited literature."
+
+  - id: NEU-003
+    claim: "Sparse KC coding with ~10% active fraction and APL-like WTA is biologically supported (Aso 2014; KC odor responses are sparse and selective)."
+    domain: neuroscience
+    source: "Aso et al. 2014; ModA/Moon 2021 reviews"
+    source_type: primary
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [brain/mushroom_body.py]
+    validation_needed: no
+    notes: "winner_take_all(keep_fraction=0.10) on 4064 KCs ≈ 406 active — plausible sparsity."
+
+  - id: NEU-004
+    claim: "MB memory phases: γ lobe labile STM, αβ stable LTM; consolidation = relaxation toward decaying equilibrium is an ENGINEERING APPROXIMATION, not a biological mechanism."
+    domain: neuroscience
+    source: "Aso 2014 (anatomy) + engineering choice in code"
+    source_type: primary
+    confidence: MED
+    implementation_status: implemented
+    affected_files: [brain/dopamine_plasticity.py]
+    validation_needed: no
+    notes: "ltm_decay 0.9995, consolidation 0.5 are free parameters with no biological anchor."
+
+  - id: NEU-005
+    claim: "DANs are organized in PAM (appetitive) and PPL1 (aversive) clusters projecting to specific MB compartments; per-compartment valence mapping is biologically supported."
+    domain: neuroscience
+    source: "Aso et al. 2014; Claridge-Chang 2009; Burke 2012"
+    source_type: primary
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [brain/dopamine_plasticity.py]
+    validation_needed: no
+    notes: "Code's signed half-split (first half PAM, second half PPL1) is decorative: dan_to_mbon is a fixed random matrix, so per-DAN valence structure has no functional consequence beyond a scalar gate."
+
+  # ---------------- SNN ----------------
+  - id: SNN-001
+    claim: "LIF dynamics are simulated with discrete Euler integration; numerically stable at current dt and tau values."
+    domain: snn
+    source: "brain/lif_engine.py code inspection"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [brain/lif_engine.py]
+    validation_needed: "yes — stress test dt/tau edge cases"
+    notes: "No refractory period modeled; no event-driven simulation."
+
+  - id: SNN-002
+    claim: "No eligibility traces, no STDP timing windows; plasticity is instantaneous outer-product update at decision time."
+    domain: snn
+    source: "brain/dopamine_plasticity.py code inspection"
+    source_type: code
+    confidence: HIGH
+    implementation_status: absent
+    affected_files: [brain/dopamine_plasticity.py]
+    validation_needed: "experiment: eligibility traces for multi-step credit"
+    notes: "Single-step credit assignment; terminal win/loss credit reaches all decisions equally diluted."
+
+  # ---------------- RL ----------------
+  - id: RL-001
+    claim: "Reward = clipped potential-like step deltas (life 0.02, board 0.05, hand 0.01, opp kill 0.15, cmdr dmg −0.10) + terminal ±1 with decay max(0.5, 1−0.01·turns)."
+    domain: reinforcement_learning
+    source: "flycommander/reward_shaping.py full read"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [flycommander/reward_shaping.py]
+    validation_needed: "reward-hacking probes (E-RL-01..03)"
+    notes: "Deltas vs _prev dict; clip ±0.5; baseline creep 0.01·RPE."
+
+  - id: RL-002
+    claim: "RPE = reward − running baseline; baseline updates by 0.01·RPE per step (non-TD critic)."
+    domain: reinforcement_learning
+    source: "brain/dopamine_plasticity.py"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [brain/dopamine_plasticity.py]
+    validation_needed: no
+    notes: "Not a value function of state; it's a scalar moving average — cannot capture state-dependent values."
+
+  - id: RL-003
+    claim: "Exploration is temperature-annealed softmax (τ 0.5→0.15 floor, ×0.995 per anneal call)."
+    domain: reinforcement_learning
+    source: "brain/mushroom_body.py"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [brain/mushroom_body.py]
+    validation_needed: "check anneal call frequency in training loop"
+    notes: "Anneal schedule depends on call frequency — verify empirically."
+
+  - id: RL-004
+    claim: "Reward signal is contaminated: Forge AI's decisions (targets, blockers, damage) influence the fly's reward but are not in the fly's action space."
+    domain: reinforcement_learning
+    source: "FlyPlayerController override set + reward_shaping.py"
+    source_type: code
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: [flycommander/reward_shaping.py]
+    validation_needed: "yes — variance decomposition experiment E-ARCH-01"
+    notes: "Confounding, not bias per se, but inflates variance and can create spurious correlations."
+
+  - id: RL-005
+    claim: "Terminal result mapping anomaly: logs show flyWon=false with reason=AllOpponentsLost — suspected result-mapping bug in AgentServer/BrainClient terminal parsing."
+    domain: reinforcement_learning
+    source: "logs/ episode JSONL summary line"
+    source_type: code
+    confidence: MED   # observed once; needs reproduction
+    implementation_status: conflicts
+    affected_files: [forge_patch/src/fly/agent/AgentServer.java, forge_patch/src/fly/agent/BrainClient.java]
+    validation_needed: "yes — reproduce with forced win and inspect terminal payload"
+    notes: "If real, win/loss labels (±1) are systematically wrong → poisons all training."
+
+  # ---------------- Sensory encoding ----------------
+  - id: SEN-001
+    claim: "64-channel encoder discards: stack contents, mana, board identities beyond 12 hash buckets for own board, opponent board identities, card types, P/T, tapped state, planeswalkers as distinct entities, battlefield permanents of opponents, attachments."
+    domain: sensory_encoding
+    source: "flycommander/sensory_encoder.py full read + empirical probe"
+    source_type: code
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [flycommander/sensory_encoder.py]
+    validation_needed: no
+    notes: "Hash-bucket collisions: MD5 % 12 over full card-name space guarantees heavy collisions."
+
+  - id: SEN-002
+    claim: "Empirical: strategically OPPOSITE states produce KC-overlap 0.61–0.67 (winning vs losing 0.67, low vs high life 0.61, turn 2 vs 40 0.68); L2 state distance 0.88–0.94 — poor strategic separation at the KC level."
+    domain: sensory_encoding
+    source: "In-repo probe, this audit (obs-builder + MushroomBody(seed 2049), 64 PN)"
+    source_type: code
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: [flycommander/sensory_encoder.py, brain/mushroom_body.py]
+    validation_needed: "repeat across seeds and many state pairs"
+    notes: "Fly can't easily distinguish 'about to lose' from 'about to win' — learning signal will be weak."
+
+  - id: SEN-003
+    claim: "Card-identity hashing (MD5 % 12) creates cross-set collisions and is order-insensitive (soft counts capped 1.5)."
+    domain: sensory_encoding
+    source: "sensory_encoder.py _bucket()"
+    source_type: code
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [flycommander/sensory_encoder.py]
+    validation_needed: no
+    notes: "Two different decks may produce identical board channels."
+
+  - id: SEN-004
+    claim: "Physical mode observation uses same encoder (same brain); no evidence physical obs includes tapped state or attachment info beyond Forge obs schema."
+    domain: sensory_encoding
+    source: "physical/brain_adapter.py + physical/state.py read"
+    source_type: code
+    confidence: MED
+    implementation_status: partial
+    affected_files: [physical/brain_adapter.py]
+    validation_needed: "yes — build identical obs dicts from physical state and diff channels"
+    notes: "Sim-vs-physical observation equivalence unproven; brain is shared, so silent distribution shift possible."
+
+  # ---------------- Action space ----------------
+  - id: ACT-001
+    claim: "Action space = 4 macro actions (play/attack/hold/interact); masking via legal_mask; hold always safe fallback."
+    domain: action_space
+    source: "brain/mushroom_body.py + FlyPlayerController"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [brain/mushroom_body.py, forge_patch/src/fly/agent/FlyPlayerController.java]
+    validation_needed: no
+    notes: "Actions not mutually exclusive in principle (play then attack same turn) — but fly acts per phase, so effectively sequential per decision window."
+
+  - id: ACT-002
+    claim: "Action granularity mismatch: encoder sees board counts + own-board identity hashes; actions are Forge-proposal selections. The fly cannot express target choice, blocking, or instant-speed plays."
+    domain: action_space
+    source: "FlyPlayerController + mushroom_body.py"
+    source_type: code
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: []
+    validation_needed: "yes — design target-level action space experiment"
+    notes: "Biggest architectural gap for MTG competence."
+
+  - id: ACT-003
+    claim: "'interact' action = select Forge's proposed removal/interaction candidate; if Forge proposes none, server holds silently."
+    domain: action_space
+    source: "AgentServer code + logs (silent hold)"
+    source_type: code
+    confidence: MED
+    implementation_status: partial
+    affected_files: [forge_patch/src/fly/agent/AgentServer.java]
+    validation_needed: "yes — add explicit no-candidate telemetry"
+    notes: "Silent hold can be logged as fly's choice, corrupting action-preference statistics."
+
+  # ---------------- Physical / vision ----------------
+  - id: VIS-001
+    claim: "Card identification = OpenCV detection + Tesseract OCR on collector number + Scryfall exact match; Tesseract 5.5.3, OpenCV 5.0.0 (venv only; system python3 lacks cv2)."
+    domain: computer_vision
+    source: "vision/*.py + physical/identifier.py + environment probe"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [vision/card_identifier.py, physical/identifier.py]
+    validation_needed: "yes — build OCR error benchmark with real card photos"
+    notes: "No real-photo OCR benchmark exists yet."
+
+  - id: VIS-002
+    claim: "Tap detection uses temporal IoU tracking + orientation change threshold; stable IDs via tracker assignment."
+    domain: computer_vision
+    source: "vision/tap_detector.py + vision/zone_tracker.py"
+    source_type: code
+    confidence: MED
+    implementation_status: implemented
+    affected_files: [vision/tap_detector.py, vision/zone_tracker.py]
+    validation_needed: "yes — labeled video benchmark"
+    notes: "No labeled evaluation data exists."
+
+  - id: VIS-003
+    claim: "Physical-state reconciliation: vision = uncertain observation, human = confirmation, engine = authoritative validation (event-sourced, with correction/undo paths)."
+    domain: physical_table
+    source: "physical/state.py + physical/events.py + physical/engine.py"
+    source_type: code
+    confidence: MED
+    implementation_status: partial
+    affected_files: [physical/state.py, physical/events.py, physical/engine.py]
+    validation_needed: "yes — impossible-transition fuzz test"
+    notes: "See physical_table/state_reconciliation.md for gap list."
+
+  # ---------------- Security ----------------
+  - id: SEC-001
+    claim: "HTTP servers bind localhost; risk model = local research project; main realistic risks are malformed JSON (unvalidated obs schema), oversized payloads, and unvalidated Scryfall cache entries."
+    domain: security
+    source: "physical/server.py + forge AgentServer code read"
+    source_type: code
+    confidence: MED
+    implementation_status: partial
+    affected_files: [physical/server.py, forge_patch/src/fly/agent/AgentServer.java]
+    validation_needed: "yes — fuzz the obs JSON schema"
+    notes: "Acceptable risk posture for local research; document, don't over-engineer."
+
+  - id: API-001
+    claim: "Scryfall API requires Accept header (HTTP 400 otherwise); ~10 req/s rate limit; bulk data daily JSONL.gz."
+    domain: magic
+    source: "Scryfall API docs (https://scryfall.com/docs/api), accessed 2026-10-01"
+    source_type: official
+    version: "API as of 2026-10-01"
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [physical/scryfall_cache.py]
+    validation_needed: no
+    notes: "Cache respects rate limiting via sleep; no retry/backoff on transient failures."
+
+  # ---------------- Training/eval ----------------
+  - id: TRN-001
+    claim: "Checkpoints save kc_to_mbon, w_mbon_action, value_baseline, temperature — but NOT pn_to_kc or dan_to_mbon (fixed 'connectome' matrices are assumed reconstructible from seed)."
+    domain: training
+    source: "brain/mushroom_body.py save/load + checkpoints/ listing"
+    source_type: code
+    confidence: HIGH
+    implementation_status: partial
+    affected_files: [brain/mushroom_body.py]
+    validation_needed: "yes — roundtrip test with a fresh-seed connectome"
+    notes: "Seed 2049 is load-bearing and undocumented in checkpoints. Loading a checkpoint with different seed silently corrupts the policy."
+
+  - id: TRN-002
+    claim: "Episode journals are JSONL with per-decision and episode-summary records; but no per-decision logging is currently enabled in logs/ (only java.log present)."
+    domain: training
+    source: "scripts/train.py + logs/ listing"
+    source_type: code
+    confidence: MED
+    implementation_status: partial
+    affected_files: [scripts/train.py]
+    validation_needed: no
+    notes: "Per-decision logs needed for credit-assignment debugging; currently absent."
+
+  - id: TRN-003
+    claim: "make test uses system python3 (no cv2) so vision tests skip/xfail there; venv runs full suite (106 pass / 1 skip)."
+    domain: training
+    source: "Makefile + test runs this audit"
+    source_type: code
+    confidence: HIGH
+    implementation_status: implemented
+    affected_files: [Makefile, tests/]
+    validation_needed: no
+    notes: "Two-environment split is a known quirk; document in CI notes."
+
+  # ---------------- Performance ----------------
+  - id: PRF-001
+    claim: "Dominant costs: JVM boot (FModel.initialize, tens of seconds), HTTP JSON round-trips per decision, NumPy dense ops on 4064×97 (kc_to_mbon) and 344×97 (dan_to_mbon) matrices — small; vision frame pipeline at camera rate."
+    domain: performance
+    source: "architecture analysis + matrix sizes from brain/connectome.py"
+    source_type: code
+    confidence: MED
+    implementation_status: implemented
+    affected_files: [scripts/train.py]
+    validation_needed: "yes — profile 100-game training run"
+    notes: "Matrices are tiny by NumPy standards; JVM amortization is the real lever."
+
+  - id: PRF-002
+    claim: "Thread.sleep(15000) in bridge startup — hardcoded 15s sleep, brittle on slow machines and wasteful on fast ones."
+    domain: performance
+    source: "forge_patch code inspection"
+    source_type: code
+    confidence: HIGH
+    implementation_status: conflicts
+    affected_files: [forge_patch/src/fly/agent/*.java]
+    validation_needed: no
+    notes: "Should be readiness-poll, not fixed sleep. Flagged, not changed (audit-only)."
