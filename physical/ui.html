@@ -105,13 +105,17 @@
     <img id="cam" alt="camera stream" style="width:100%;border-radius:8px;background:#000;display:block">
     <div class="row">
       <button class="primary" id="scanBtn" onclick="scanBurst()">📷 Scan card</button>
+      <button id="identifyBtn" onclick="identifyNow()">🔍 Identify all</button>
       <input id="regSet" placeholder="set (FDN)" size="7">
       <input id="regNum" placeholder="#216" size="6">
       <button onclick="registerManual()">Manual</button>
       <button onclick="post('event',{type:'token_created',payload:{tokenType:'Soldier',count:1,power:1,toughness:1}})">+Token</button>
       <button onclick="toggleDebug()">🐞</button>
     </div>
+    <div id="visionBar" class="muted" style="margin:6px 0"></div>
+    <div id="forgeBar" class="muted" style="margin:6px 0"></div>
     <div id="scanResult"></div>
+    <div id="recognisedBox"></div>
     <div id="debugView" style="display:none" class="muted">
       <img id="debugOverlay" alt="annotated frame">
       <div id="debugStateLine"></div>
@@ -156,8 +160,124 @@ async function refresh() {
   renderBoard("yourBoard", s.state.battlefield.filter(c => c.controller === "player"));
   renderPending(s.pending);
   renderBrain(s);
+  renderVision(s.vision);
+  renderForge(s.forge);
   const log = document.getElementById("eventLog");
   log.innerHTML = s.events.map(e => e.replace(/&/g,"&amp;").replace(/</g,"&lt;")).join("<br>");
+}
+
+function renderVision(v) {
+  const bar = document.getElementById("visionBar");
+  if (!v) { bar.textContent = ""; return; }
+  const emb = v.embedder || {};
+  const detector = v.detector || "?";
+  const idx = v.indexSize || 0;
+  const ready = v.ready;
+  bar.innerHTML =
+    `<b>vision</b>: ${ready ? "🟢 neural" : "🟡 no index"} · ` +
+    `index <b>${idx}</b> cards · detector ${esc(detector)} · ` +
+    `embedder ${esc(emb.name || "?")}${emb.trained ? " (trained)" : " (untrained)"}` +
+    (v.indexError ? ` · <span style="color:#e6b84c">${esc(v.indexError)}</span>` : "") +
+    (ready ? "" : ` <button onclick="buildIndex()">Build index</button>`);
+}
+
+function renderForge(f) {
+  const bar = document.getElementById("forgeBar");
+  if (!f) { bar.textContent = ""; return; }
+  if (!f.enabled) {
+    bar.innerHTML = `<b>forge</b>: <span class="muted">mirror off</span>`;
+    return;
+  }
+  const state = f.connected
+    ? (f.pending ? `🟡 ${f.pending} action(s) queued` : "🟢 in sync")
+    : "🔴 not running";
+  const forgeStats = f.forge
+    ? ` · forge applied ${f.forge.applied}${f.forge.rejected ? " / rejected " + f.forge.rejected : ""}`
+    : "";
+  bar.innerHTML = `<b>forge</b>: ${state} <span class="muted">${esc(f.url)} · seat ${esc(f.seat)}${forgeStats}</span>` +
+    (f.pending || f.dropped
+      ? ` <span class="muted">(physical spool ${f.pending}${f.dropped ? ", dropped " + f.dropped : ""})</span>` : "") +
+    (f.connected ? "" : ` <button onclick="refreshForge()">Retry</button>`) +
+    ` <button onclick="syncForge()">Sync to Forge</button>`;
+}
+
+async function refreshForge() {
+  const r = await (await fetch(API + "/api/forge/status")).json();
+  renderForge(r);
+}
+
+async function syncForge() {
+  const bar = document.getElementById("forgeBar");
+  bar.innerHTML = "syncing the physical battlefield to Forge…";
+  const r = await post("forge/sync", {});
+  bar.innerHTML = `sync: ${esc(r.status)} — ${r.battlefield || 0} permanent(s) mirrored`;
+  await refresh();
+}
+
+async function buildIndex(synthetic = 48) {
+  const bar = document.getElementById("visionBar");
+  bar.innerHTML = "building recognition index…";
+  const r = await post("vision/index", {synthetic});
+  bar.innerHTML = `index built: ${(r.cards && r.cards.cards) || r.cards || "?"} cards · ` +
+                  `embedder ${esc((r.embedder) || "?")}`;
+  await refresh();
+}
+
+async function identifyNow() {
+  const el = document.getElementById("recognisedBox");
+  el.innerHTML = `<div class="box">identifying…</div>`;
+  const r = await (await fetch(API + "/api/vision/identify", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({})})).json();
+  renderRecognised(r);
+  await refresh();
+}
+
+function renderRecognised(r) {
+  const el = document.getElementById("recognisedBox");
+  if (!r || r.status !== "ok") {
+    el.innerHTML = r && r.error ? `<div class="box bad">${esc(r.error)}</div>` : "";
+    return;
+  }
+  const cards = r.cards || [];
+  if (!cards.length) {
+    el.innerHTML = `<div class="box bad">No card detected — place a card in view.</div>`;
+    return;
+  }
+  let html = "";
+  cards.forEach((c) => {
+    const m = c.match || {};
+    const top = (m.candidates || [])[0];
+    const conf = top ? Math.round(top.confidence * 100) : 0;
+    const unknown = m.unknown;
+    html += `<div class="box ${unknown ? "" : "good"}" style="margin-top:6px">`;
+    html += `<b>${unknown ? "NOT IN LIBRARY" : "RECOGNISED"}</b> `;
+    html += top ? `<b>${esc(top.name)}</b> <span class="muted">[${esc(top.set)} #${esc(top.collectorNumber)}] ${conf}%</span>`
+                : `<span class="muted">no candidates yet</span>`;
+    html += `<div class="muted">tilt ${c.orientationDeg}° · ${c.framesSeen} frames · ` +
+            `glare ${Math.round((c.geometry.glareFrac||0)*100)}% · coverage ` +
+            `${Math.round((c.geometry.coverage||0)*100)}%</div>`;
+    if (m.candidates && m.candidates.length > 1) {
+      html += `<div class="muted">also possible: ` +
+        m.candidates.slice(1, 4).map(x => esc(x.name) + " " +
+          Math.round(x.confidence * 100) + "%").join(" · ") + `</div>`;
+    }
+    if (top && (unknown || conf < 66)) {
+      html += `<div class="row"><button onclick='confirmRecognition(${JSON.stringify(JSON.stringify(
+        {name: top.name, set: top.set, collectorNumber: top.collectorNumber,
+         confidence: top.confidence, addToIndex: unknown,
+         cardImage: c.cardImage})).replace(/'/g, "&apos;")})'>` +
+        `Confirm${unknown ? " + remember" : ""}</button></div>`;
+    }
+    html += `</div>`;
+  });
+  el.innerHTML = html;
+}
+
+async function confirmRecognition(payloadJson) {
+  const payload = JSON.parse(payloadJson);
+  await post("vision/register", payload);
+  document.getElementById("recognisedBox").innerHTML = "";
+  await refresh();
 }
 
 function renderBoard(id, cards) {

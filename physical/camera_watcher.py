@@ -35,7 +35,6 @@ from physical.camera import CameraCapture, Watchdog
 from physical.card_scan import CV_AVAILABLE, score_frame_quality
 from physical.observer import PhysicalObserver
 from physical.tracker import Detection
-from vision.card_analysis import analyze_frame
 
 _REOPEN_BACKOFF_S = 5.0
 _PREVIEW_INTERVAL_S = 0.10          # MJPEG preview cadence (~10 FPS encode)
@@ -53,9 +52,15 @@ class CameraWatcher:
     def __init__(self, observer: PhysicalObserver,
                  settings: Any | None = None,
                  config_path: str | None = None,
-                 fps_target: float = 5.0) -> None:
+                 fps_target: float = 5.0,
+                 recognizer: Any | None = None) -> None:
         from physical.camera_config import load_camera_settings  # local: avoids import cycles
         self.observer = observer
+        # neural recognition pipeline (physical/vision_pipeline.CardRecognizer).
+        # When present and its index is ready, every analysis pass runs
+        # detection -> perspective correction -> identification; otherwise the
+        # legacy analysis path is used so the table always works.
+        self.recognizer = recognizer
         self.settings = settings or load_camera_settings(config_path)
         self.config_path = config_path
         self.device_index = self.settings.device          # back-compat alias
@@ -64,6 +69,9 @@ class CameraWatcher:
         self.interval = 1.0 / fps_target                  # analysis cadence, not capture rate
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._open_attempts = 0        # consecutive failed opens (backoff)
+        self._last_open_error = ""     # de-duplicates the open-failure log
+        self._last_open_log = 0.0
         self._frame_lock = threading.Lock()
         self._last_frame = None
         self._frame_seq = 0                               # freshness counter for get_burst
@@ -173,9 +181,16 @@ class CameraWatcher:
             opened = self._open_camera()
             if not opened:
                 # Nothing usable: surface the error, wait, retry. Never exit
-                # silently — the UI shows lastError.
-                stop.wait(_REOPEN_BACKOFF_S)
+                # silently — the UI shows lastError. Back off exponentially
+                # (5 s → 60 s) so a machine with no camera logs one line, not
+                # a flood, and recovers quickly when the camera appears.
+                self._open_attempts += 1
+                delay = min(60.0, _REOPEN_BACKOFF_S * (2 ** (self._open_attempts - 1)))
+                self.stats["reopenIn"] = round(delay, 1)
+                stop.wait(delay)
                 continue
+            self._open_attempts = 0
+            self.stats["reopenIn"] = 0.0
             cam = self._cam
             assert cam is not None
             self.stats["running"] = True
@@ -265,23 +280,57 @@ class CameraWatcher:
             cam = CameraCapture(self.settings)
             cam.open()
         except CameraOpenError as exc:
-            self.stats["lastError"] = str(exc).splitlines()[0]
+            summary = str(exc).splitlines()[0]
+            self.stats["lastError"] = summary
             if cam is not None:
                 self.stats["diagnostics"] = cam.diag.to_dict()
-                print(f"[camera] open failed: {exc}")
+            # Log the headline once, then only when the failure changes (or
+            # every tenth attempt as a heartbeat) — a missing device must not
+            # fill the log with the same stack of attempts.
+            now = time.time()
+            changed = summary != self._last_open_error
+            if changed or now - self._last_open_log > 300.0:
+                attempts = "; ".join(
+                    a.get("result", "?") for a in self.stats.get(
+                        "diagnostics", {}).get("attempts", []))
+                print(f"[camera] open failed: {summary}"
+                      + (f" (attempts: {attempts})" if attempts else "")
+                      + ("" if changed else
+                         f"  [will keep retrying; {self._open_attempts} attempts so far]"),
+                      flush=True)
+                self._last_open_log = now
+            self._last_open_error = summary
             return False
         self._cam = cam
         return True
 
     def _detections_from_analysis(self, analysis: dict[str, Any]) -> list[Detection]:
-        """Confident single-card analysis -> tracker Detections.
+        """Confident card analysis -> tracker Detections.
 
         Every field is optional: a detection without usable geometry is still
         a detection — it contributes no tracking update, bumps cardsSeen, and
         must never raise (never trust dict keys; a watcher thread that dies
         silently kills the whole table).
+
+        The neural pipeline reports *all* cards in view (multi-card scenes are
+        normal on a table); the legacy path reports just the best candidate.
         """
         detections: list[Detection] = []
+        cards = analysis.get("cards")
+        if analysis.get("pipeline") == "neural" and isinstance(cards, list):
+            for card in cards:
+                try:
+                    bbox = card.get("bbox")
+                    if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+                        continue
+                    x, y, w, h = (float(v) for v in bbox)
+                    detections.append(Detection(
+                        bbox=(x, y, w, h),
+                        angle_deg=float(card.get("orientationDeg") or 0.0),
+                        confidence=float(card.get("match", {}).get("topScore") or 0.5)))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            return detections
         best = analysis.get("best_candidate") or {}
         if (analysis.get("card_detected")
                 and not analysis.get("multiple_cards")
@@ -339,7 +388,17 @@ class CameraWatcher:
             }
             return
 
-        analysis = analyze_frame(frame, quality=q)
+        if self.recognizer is not None and getattr(self.recognizer, "ready", False):
+            try:
+                analysis = self._neural_analysis(frame, cam, q)
+            except Exception as exc:      # never kill the capture thread
+                print(f"[vision] neural analysis failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+                analysis = None
+            if analysis is None:
+                analysis = self._legacy_analysis(frame, q)
+        else:
+            analysis = self._legacy_analysis(frame, q)
         analysis["camera"] = self._camera_summary(cam)
         self._store_analysis(analysis)
         t_analysis = time.time() - t0
@@ -357,6 +416,53 @@ class CameraWatcher:
             "analysisMs": round(t_analysis * 1000, 1),
             "trackerMs": round(t_tracker * 1000, 1),
         }
+
+    def _legacy_analysis(self, frame, quality) -> dict[str, Any]:
+        """OCR-era analysis (kept as the fallback when no index exists yet)."""
+        from vision.card_analysis import analyze_frame
+
+        return analyze_frame(frame, quality=quality)
+
+    def _neural_analysis(self, frame, cam: CameraCapture, quality) -> dict[str, Any]:
+        """Detection + perspective correction + recognition for one frame.
+
+        The result keeps the legacy keys the UI and observer understand
+        (state/card_detected/reason/candidates/best_candidate) and adds the
+        full neural payload under `cards` / `pipeline` / `timings`.
+        """
+        scene = self.recognizer.recognize(frame)
+        cards = scene.cards
+        best = scene.best()
+        top_conf = best.confidence if best else 0.0
+        if not cards:
+            reason = ("No card detected — place a card in view."
+                      if quality.score >= 0.18 else
+                      "Image quality low. Improve lighting.")
+        elif best is not None and best.stable_key:
+            reason = (f"{best.stable_name} ({best.stable_confidence:.0%}"
+                      f", {len(cards)} card{'s' if len(cards) > 1 else ''} in view)")
+        elif best is not None and best.top is not None:
+            reason = (f"{len(cards)} card(s) detected · best guess "
+                      f"{best.top.name} ({best.top.confidence:.0%})")
+        else:
+            reason = f"{len(cards)} card(s) detected"
+        analysis: dict[str, Any] = {
+            "state": "card_detected" if cards else "no_card",
+            "card_detected": bool(cards),
+            "confidence": top_conf,
+            "reason": reason,
+            "candidates": [c.to_dict() for c in cards],
+            "best_candidate": cards[0].to_dict() if cards else None,
+            "cards": [c.to_dict() for c in cards],
+            "multiple_cards": len(cards) > 1,
+            "pipeline": "neural",
+            "indexSize": scene.index_size,
+            "notes": list(scene.notes),
+            "timings": scene.timings,
+            "quality": quality.to_dict(),
+        }
+        self.stats["cardsSeen"] = self.stats.get("cardsSeen", 0) + len(cards)
+        return analysis
 
     def _camera_summary(self, cam: CameraCapture) -> dict[str, Any]:
         d = cam.diag

@@ -13,10 +13,16 @@ Endpoints:
   POST /api/pending/reject   reject pending[i]
   POST /api/register         manual registration {"set","collectorNumber"}
   POST /api/brain/decide     ask the fly for a decision now
+  GET  /api/vision/status    recognition index / detector / embedder state
+  POST /api/vision/identify  identify every card in the current frame
+  POST /api/vision/register  confirm a card (optionally add to the index)
+  GET  /api/forge/status     physical-table ⇄ Forge bridge state
+  POST /api/forge/sync       full idempotent battlefield resync to Forge
 """
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,12 +53,15 @@ def cv2_decode(buf):
         return None
     import cv2
     return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+from cards.database import CardDatabase
 from physical.engine import Engine
 from physical.events import Event, EventLog
 from physical.identifier import CardIdentifier, Evidence
 from physical.registration import CardRegistrar
 from physical.scryfall_cache import ScryfallCache
 from physical.state import PhysicalGameState
+from physical.vision_pipeline import CardRecognizer, RecognitionConfig
+from flycommander.forge_table_bridge import ForgeTableBridge
 
 UI_PATH = Path(__file__).resolve().parent / "ui.html"
 
@@ -79,11 +88,27 @@ class PhysicalTableApp:
         from physical.observer import PhysicalObserver
         from physical.tracker import CardTracker
         self.observer = PhysicalObserver(self.engine,
+                                         on_event=self.mirror_to_forge,
                                          tracker=CardTracker(
                                              tap_tolerance_deg=30.0,
                                              settle_frames=2))
+        # ---- neural recognition pipeline (the primary vision path) ---------
+        self.vision_config = RecognitionConfig(
+            index_dir=str(Path(data_dir) / "cards"))
+        self.card_db = CardDatabase(self.vision_config.index_dir,
+                                    allow_network=allow_network)
+        self.recognizer = CardRecognizer(self.vision_config,
+                                         database=self.card_db)
+        self.last_recognition: dict | None = None
+        # ---- Forge bridge: the physical mirror feeds the real rules engine --
+        self.forge = ForgeTableBridge(
+            base_url=os.environ.get("FLYCOMMANDER_FORGE_AGENT",
+                                    "http://127.0.0.1:8791"),
+            table_id=os.environ.get("FLYCOMMANDER_TABLE_ID", "physical"),
+            enabled=os.environ.get("FLYCOMMANDER_FORGE_SYNC", "1") != "0")
         self.watcher = CameraWatcher(self.observer,
-                                     config_path=camera_config)
+                                     config_path=camera_config,
+                                     recognizer=self.recognizer)
 
         connectome = build_synthetic_connectome(n_pn=64)
         self.mb = MushroomBody(64, connectome=connectome)
@@ -107,11 +132,170 @@ class PhysicalTableApp:
                 for i, e in enumerate(self.engine.pending)
             ],
             "camera": self.watcher.stats,
+            "vision": self.vision_status(),
+            "forge": self.forge.status(),
         }
 
     # ------------------------------------------------------------------
+    # neural vision API (used by the UI and by physical-table play)
+    # ------------------------------------------------------------------
+    def vision_status(self) -> dict:
+        """Index/embedder/detector state for the UI vision panel."""
+        status = self.recognizer.status()
+        status["cards"] = self.card_db.stats()
+        status["recognition"] = self.last_recognition
+        status["lastScene"] = (self.recognizer.last_scene.to_dict(include_images=False)
+                               if self.recognizer.last_scene else None)
+        return status
+
+    def vision_identify(self, images_b64: list[str] | None = None,
+                        include_images: bool = True) -> dict:
+        """Identify every card in the current frame (or supplied frames).
+
+        This is the *fast* path: no OCR, no registration. It returns each
+        card with its ranked candidates so the UI can show "recognised as X"
+        or offer a chooser when two printings are genuinely ambiguous.
+        """
+        frame = None
+        if images_b64:
+            import base64
+            for b64 in images_b64[:4]:
+                try:
+                    payload = base64.b64decode(str(b64).split(",", 1)[-1])
+                    img = cv2_decode(np.frombuffer(payload, dtype=np.uint8))
+                    if img is not None:
+                        frame = img
+                        break
+                except Exception:
+                    continue
+        if frame is None:
+            burst = self.watcher.get_burst(3)
+            frame = burst[-1] if burst else None
+        if frame is None:
+            return {"status": "error", "error": "no frame available"}
+        scene = self.recognizer.recognize(frame)
+        out = scene.to_dict(include_images=include_images)
+        self.last_recognition = {"t": time.time(),
+                                 "cards": [c.to_dict(include_image=False)
+                                           for c in scene.cards],
+                                 "timings": scene.timings}
+        out["status"] = "ok"
+        return out
+
+    def vision_build_index(self, synthetic: int = 0, limit: int | None = None,
+                           sync_scryfall: bool = False,
+                           download_images: int = 0) -> dict:
+        """Build/refresh the recognition index from local, synthetic or
+        Scryfall sources (network use is explicit and opt-in)."""
+        notes: list[str] = []
+        if sync_scryfall:
+            notes.append(str(self.card_db.sync_scryfall(limit=limit)))
+        if download_images:
+            notes.append(str(self.card_db.download_images(limit=download_images)))
+        if synthetic:
+            notes.append(f"synthetic cards added: {self.card_db.import_synthetic(synthetic)}")
+        if self.card_db.store.image_count() == 0:
+            # a table with no images is useless: seed the demo library so the
+            # pipeline is immediately usable and verifiable
+            added = self.card_db.import_synthetic(synthetic or 48)
+            notes.append(f"seeded {added} synthetic cards (no images found)")
+        info = self.recognizer.build_index(limit=limit)
+        info["notes"] = notes
+        info["cards"] = self.card_db.stats()
+        return {"status": "ok", **info}
+
+    def vision_register(self, payload: dict) -> dict:
+        """Confirm one recognised card: register it on the table and, when it
+        was not in the index, remember it so the same card is instant next
+        time (this is the *only* manual step the design allows)."""
+        name = str(payload.get("name", "")).strip()
+        set_code = str(payload.get("set", "")).strip().lower()
+        number = str(payload.get("collectorNumber", "")).strip()
+        zone = str(payload.get("zone", "battlefield"))
+        if not name:
+            return {"status": "error", "error": "name required"}
+        if not (set_code and number):
+            info = self.card_db.client.named(name)
+            if info is not None:
+                set_code, number = info.set_code, info.collector_number
+        card_image_b64 = payload.get("cardImage")
+        added_to_index = None
+        if payload.get("addToIndex") and card_image_b64:
+            import base64
+            try:
+                data = base64.b64decode(str(card_image_b64).split(",", 1)[-1])
+                img = cv2_decode(np.frombuffer(data, dtype=np.uint8))
+                if img is not None:
+                    added_to_index = self.recognizer.register_card(
+                        img, set_code or "lcl", number or str(
+                            self.card_db.store.image_count() + 1), name)
+                    self.recognizer.save_index()
+            except Exception as exc:      # pragma: no cover - defensive
+                added_to_index = {"error": f"{type(exc).__name__}: {exc}"}
+        reg = self.engine.apply_player(
+            "card_registered", name=name, set=set_code, collectorNumber=number,
+            cardType=payload.get("cardType", ""), zone=zone,
+            controller="player",
+            confidence=float(payload.get("confidence") or 0.9))
+        return {"status": "ok", **{k: v for k, v in reg.items() if k != "status"},
+                "name": name, "index": added_to_index}
+
+    # ------------------------------------------------------------------
     def apply_player_event(self, etype: str, payload: dict) -> dict:
-        return self.engine.apply_player(etype, **payload)
+        result = self.engine.apply_player(etype, **payload)
+        self.mirror_to_forge({"type": etype, "origin": "player",
+                              "payload": payload})
+        return result
+
+    # ------------------------------------------------------------------
+    # Forge mirror
+    # ------------------------------------------------------------------
+    def mirror_to_forge(self, event: Any) -> dict | None:
+        """Forward one physical fact to Forge (spooled when Forge is down).
+
+        Vision is the table's eyes, not its judge: every event that survives
+        the physical reconciliation above is handed to Forge, which owns the
+        rules, the stack and the real state. Identity (set + collector, token
+        type, counters) is attached from the physical mirror so Forge resolves
+        the *exact* printing the camera saw.
+        """
+        if not self.forge.enabled:
+            return None
+        data = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+        payload = data.setdefault("payload", {})
+        tid = payload.get("trackingId") or payload.get("tracking_id")
+        obj = self.state.get(tid) if tid else None
+        if obj is not None:
+            payload.setdefault("name", obj.name)
+            if obj.set_code:
+                payload.setdefault("set", obj.set_code)
+            if obj.collector_number:
+                payload.setdefault("collectorNumber", str(obj.collector_number))
+            if obj.oracle_id:
+                payload.setdefault("oracleId", obj.oracle_id)
+            if obj.is_token:
+                payload.setdefault("isToken", True)
+                payload.setdefault("tokenType", obj.token_type or obj.name)
+            if obj.counters and "counter" not in payload:
+                payload.setdefault("counters", dict(obj.counters))
+            if data.get("type") == "zone_change":
+                payload.setdefault("from", obj.zone)
+        try:
+            return self.forge.send([data])
+        except Exception as exc:                              # noqa: BLE001
+            return {"status": "error", "error": str(exc)}
+
+    def forge_status(self, probe: bool = True) -> dict:
+        status = self.forge.status(probe=probe)
+        if probe and status["connected"]:
+            stats = self.forge.queue_stats()
+            if stats:
+                status["forge"] = stats
+        return status
+
+    def forge_sync(self) -> dict:
+        """Push the whole physical battlefield to Forge (idempotent)."""
+        return self.forge.sync_state(self.state)
 
     def register_manual(self, set_code: str, collector_number: str,
                         zone: str = "battlefield") -> dict:
@@ -143,10 +327,14 @@ class PhysicalTableApp:
         for the existing UI.
         """
         import base64
-        if not SCAN_AVAILABLE:
+        if not SCAN_AVAILABLE and not self.recognizer.ready:
             return {"status": "error", "state": "error",
                     "error": "OpenCV/Tesseract missing on server; use manual entry",
                     "candidates": []}
+        if self.recognizer.ready:
+            neural = self.scan_frames_neural(images_b64)
+            if neural is not None:
+                return neural
         frames: list = []
         for b64 in (images_b64 or [])[:12]:
             try:
@@ -329,6 +517,11 @@ class PhysicalTableApp:
                                         "duplicate": True}
                 state_id = existing.tracking_id
             else:
+                self.forge.remember_track(
+                    best.track_id or "",
+                    name=top.name, set_code=top.set_code,
+                    collector_number=str(top.collector_number),
+                    oracle_id=getattr(top, "oracle_id", None))
                 reg = self.engine.apply_player(
                     "card_registered", name=top.name, set=top.set_code,
                     collectorNumber=top.collector_number,
@@ -345,12 +538,150 @@ class PhysicalTableApp:
                     self.observer.bind(newest["trackId"], state_id)
         return result
 
+    def scan_frames_neural(self, images_b64: list[str] | None = None) -> dict | None:
+        """Neural scan path: identify the best card in the frame and offer it.
+
+        Returns None when the neural path cannot run (no index / no cv2), so
+        the caller can fall back to the OCR pipeline. The result keeps the
+        legacy scan contract (status/state/candidates/evidence) *and* carries
+        the full recognition payload, so the existing UI keeps working while
+        the new panel gets richer data.
+        """
+        if not CV_AVAILABLE or not self.recognizer.ready:
+            return None
+        import base64
+        frames: list = []
+        for b64 in (images_b64 or [])[:12]:
+            try:
+                payload = base64.b64decode(str(b64).split(",", 1)[-1])
+                img = cv2_decode(np.frombuffer(payload, dtype=np.uint8))
+                if img is not None:
+                    frames.append(img)
+            except Exception:
+                continue
+        if not frames:
+            frames = self.watcher.get_burst(3)
+        if not frames:
+            return {"status": "error", "state": "error",
+                    "error": "no readable frames", "candidates": [],
+                    "pipeline": "neural"}
+        frame = frames[-1]
+        t0 = time.time()
+        scene = self.recognizer.recognize(frame)
+        best = scene.best()
+        self.last_recognition = {"t": time.time(),
+                                 "cards": [c.to_dict(include_image=False)
+                                           for c in scene.cards],
+                                 "timings": scene.timings}
+        if best is None:
+            self.last_scan = {"pipeline": "neural", "scene": scene.to_dict()}
+            return {"status": "nocard", "state": "no_card", "card_detected": False,
+                    "confidence": 0.0, "candidates": [], "pipeline": "neural",
+                    "message": "No card detected — place a card in view.",
+                    "analysis": scene.to_dict()}
+        # the *identity* candidates for the card being scanned (what the UI
+        # and the WHICH CARD? chooser need), plus the other cards in view
+        candidates = [c.to_dict() for c in best.match.candidates[:5]]
+        for cand in candidates:
+            cand["trackId"] = best.track_id
+            cand["stable"] = bool(best.stable_key == cand.get("set", "").lower()
+                                  + ":" + str(cand.get("collectorNumber", "")))
+        other_cards = [c.to_dict(include_image=False) for c in scene.cards
+                       if c is not best]
+        top = best.top
+        # a stable, confident identity auto-registers (singleton rule applies)
+        registered = None
+        # an explicit scan (frames supplied by the UI) is an intentional
+        # "identify this" action, so a single confident frame is enough; the
+        # live watcher path still requires the identity to be stable
+        stable_enough = (best.stable_votes >= self.vision_config.stable_votes
+                         or bool(images_b64))
+        if (top is not None and not best.match.unknown
+                and top.confidence >= self.vision_config.auto_accept_confidence
+                and stable_enough):
+            existing = next((o for o in self.state.battlefield("player")
+                             if o.name.lower() == top.name.lower()), None)
+            if existing is not None:
+                registered = {"trackingId": existing.tracking_id,
+                              "name": existing.name, "duplicate": True}
+            else:
+                self.forge.remember_track(
+                    best.track_id or "",
+                    name=top.name, set_code=top.set_code,
+                    collector_number=str(top.collector_number),
+                    oracle_id=getattr(top, "oracle_id", None))
+                reg = self.engine.apply_player(
+                    "card_registered", name=top.name, set=top.set_code,
+                    collectorNumber=top.collector_number,
+                    cardType=getattr(top, "type_line", "") or "",
+                    zone="battlefield",
+                    controller="player", confidence=top.confidence)
+                registered = {**reg, "name": top.name}
+            if registered and registered.get("trackingId"):
+                self.observer.bind(best.track_id, registered["trackingId"])
+        self.last_scan = {
+            "pipeline": "neural",
+            "scene": scene.to_dict(),
+            "timings": scene.timings,
+            "recognised": best.to_dict(include_image=True),
+            "totalMs": round((time.time() - t0) * 1000, 1),
+        }
+        status = "ok" if (top is not None and not best.match.unknown) else "no_candidates"
+        message = ""
+        if top is None:
+            message = "Card detected but not identified yet — hold still a moment."
+        elif best.match.unknown:
+            message = (f"Card not in the library (closest: {top.name} "
+                       f"{top.confidence:.0%}). Add it to recognise it instantly.")
+        return {
+            "status": status,
+            "state": "card_detected",
+            "card_detected": True,
+            "pipeline": "neural",
+            "confidence": top.confidence if top else 0.0,
+            "candidates": candidates,
+            "evidence": {"visualScore": top.scores.get("embed", 0.0) if top else 0.0,
+                         "nameRaw": top.name if top else "",
+                         "nameConfidence": top.confidence if top else 0.0,
+                         "set": top.set_code if top else "",
+                         "collectorNumber": top.collector_number if top else ""},
+            "message": message,
+            "rectifiedCard": (self.last_scan["recognised"] or {}).get("cardImage"),
+            "registered": registered,
+            "recognition": best.to_dict(include_image=False),
+            "otherCards": other_cards,
+            "scene": scene.to_dict(include_images=False),
+        }
+
     def register_candidate(self, index: int) -> dict:
-        """Player picked one of the offered candidates."""
+        """Player picked one of the offered candidates (OCR or neural path)."""
         cand_list = getattr(self, "_last_candidates", [])
-        if not cand_list or index >= len(cand_list):
+        if not cand_list:
+            scan = self.last_scan or {}
+            scene_cards = ((scan.get("scene") or {}).get("cards") or [])
+            if scan.get("pipeline") == "neural" and scene_cards:
+                cand_list = [c["match"]["candidates"] for c in scene_cards
+                             if c.get("match", {}).get("candidates")]
+                cand_list = [c for group in cand_list for c in group]
+            if not cand_list:
+                rec = (scan.get("recognised") or {}).get("match", {})
+                cand_list = list(rec.get("candidates") or [])
+            if not cand_list:
+                return {"status": "error", "error": "no scan to register from"}
+        if index >= len(cand_list):
             return {"status": "error", "error": "no such candidate"}
-        c = cand_list[index]
+        raw = cand_list[index]
+        if isinstance(raw, dict) and "name" in raw and "combinedConfidence" not in raw:
+            # neural candidate dict
+            reg = self.engine.apply_player(
+                "card_registered", name=raw.get("name", ""),
+                set=raw.get("set", ""),
+                collectorNumber=str(raw.get("collectorNumber", "")),
+                cardType=raw.get("cardType", ""), zone="battlefield",
+                controller="player",
+                confidence=float(raw.get("confidence") or 0.7))
+            return {"status": "ok", **reg, "name": raw.get("name", "")}
+        c = raw
         reg = self.engine.apply_player(
             "card_registered", name=c.name, set=c.set_code,
             collectorNumber=c.collector_number, cardType=c.card_type,
@@ -402,9 +733,19 @@ class PhysicalTableApp:
 
 
 class PhysicalTableServer:
-    def __init__(self, app: PhysicalTableApp, port: int = 8795) -> None:
+    """Local HTTP server for the physical table (UI + state + vision API).
+
+    Binds 0.0.0.0 by default: the table is often viewed from another device
+    (tablet on the table, phone as a second screen) or through a proxy when
+    running inside a dev sandbox. Pass host="127.0.0.1" to restrict it to the
+    local machine.
+    """
+
+    def __init__(self, app: PhysicalTableApp, port: int = 8795,
+                 host: str = "0.0.0.0") -> None:
         self.app = app
         self.port = port
+        self.host = host
         self._http: ThreadingHTTPServer | None = None
 
     # ------------------------------------------------------------------
@@ -425,11 +766,17 @@ class PhysicalTableServer:
 
             def _send(self, code: int, body, ctype: str):
                 data = body.encode("utf-8") if isinstance(body, str) else body
-                self.send_response(code)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError):
+                    # the client went away (closed tab, timed-out curl): not an
+                    # error worth a traceback in the table's log
+                    self.close_connection = True
 
             def _send_json(self, code: int, obj: dict):
                 self._send(code, json.dumps(obj), "application/json")
@@ -460,6 +807,9 @@ class PhysicalTableServer:
                     pass  # client left — normal end of stream
 
             def _read_json(self) -> dict:
+                # Read the request body EXACTLY once (do_POST does it at the
+                # top). Reading again on a keep-alive connection blocks until
+                # the client sends more bytes — a request that never answers.
                 length = int(self.headers.get("Content-Length", 0))
                 if not length:
                     return {}
@@ -491,6 +841,16 @@ class PhysicalTableServer:
                         self._send_json(503, {"error": "camera warming up"})
                     else:
                         self._send(200, jpeg, "image/jpeg")
+                elif path == "/api/vision/status":
+                    self._send_json(200, app.vision_status())
+                elif path == "/api/forge/status":
+                    self._send_json(200, app.forge_status(probe=True))
+                elif path == "/api/forge/queue":
+                    self._send_json(200, app.forge.queue_stats() or {})
+                elif path == "/api/vision/identify":
+                    self._send_json(200, app.vision_identify())
+                elif path == "/api/vision/log":
+                    self._send_json(200, {"log": list(app.recognizer.recognition_log)[-20:]})
                 elif path == "/api/tracks":
                     self._send_json(200, {
                         "tracks": app.observer.tracker_tracks_snapshot(),
@@ -513,6 +873,18 @@ class PhysicalTableServer:
                             str(body.get("collectorNumber", "")),
                             zone=str(body.get("zone", "battlefield")))
                         self._send_json(200, out)
+                    elif self.path.split("?",1)[0] == "/api/vision/identify":
+                        self._send_json(200, app.vision_identify(
+                            list(body.get("images", [])),
+                            include_images=bool(body.get("includeImages", True))))
+                    elif self.path.split("?",1)[0] == "/api/vision/index":
+                        self._send_json(200, app.vision_build_index(
+                            synthetic=int(body.get("synthetic", 0)),
+                            limit=body.get("limit"),
+                            sync_scryfall=bool(body.get("syncScryfall", False)),
+                            download_images=int(body.get("downloadImages", 0))))
+                    elif self.path.split("?",1)[0] == "/api/vision/register":
+                        self._send_json(200, app.vision_register(body))
                     elif self.path.split("?",1)[0] == "/api/register/frame":
                         self._send_json(200, app.scan_frames(
                             list(body.get("images", []))))
@@ -527,14 +899,19 @@ class PhysicalTableServer:
                     elif self.path.split("?",1)[0] == "/api/pending/reject":
                         self._send_json(200, app.engine.reject_pending(
                             int(body.get("index", 0))))
+                    elif self.path.split("?",1)[0] == "/api/forge/sync":
+                        self._send_json(200, app.forge_sync())
                     elif self.path.split("?",1)[0] == "/api/brain/decide":
                         self._send_json(200, app.decide())
                     else:
                         self._send_json(404, {"error": "not found"})
                 except (ValueError, KeyError) as exc:
                     self._send_json(400, {"error": str(exc)})
+                except (BrokenPipeError, ConnectionResetError,
+                        ConnectionAbortedError):
+                    self.close_connection = True
 
-        self._http = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        self._http = ThreadingHTTPServer((self.host, self.port), Handler)
         threading.Thread(target=self._http.serve_forever,
                          name="physical-table", daemon=True).start()
 

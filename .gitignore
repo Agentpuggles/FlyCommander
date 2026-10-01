@@ -16,6 +16,8 @@ checkpoints/
 *.pt
 *.pth
 *.onnx
+# trained embedder + calibration (rebuild: scripts/train_embedder.py)
+vision/weights/
 
 # Data/cache
 data/

@@ -120,6 +120,15 @@ Forge 2.0.15 desktop jar at `/home/flynn/Downloads/mtg forge`.
   value baseline is a running mean, not a learned critic.
 - Untrained, the fly loses to Forge AI (it hold-heavy-plays at first);
   expect slow improvement over hundreds of games, not AlphaZero.
+- Recognition accuracy is trained on *synthetic* cards (`vision/synthetic.py`),
+  because a real photos-of-real-cards dataset does not exist in this repo. The
+  pipeline is real (detector → homography → embedding → Scryfall); the training
+  data is a stand-in. `--sync-scryfall` builds the index from real card images,
+  and these weights can be fine-tuned on real captures as they accumulate
+  (`high-confidence confirmed` scans are exactly the labels to use).
+- The Forge-side table endpoints (`forge_patch/src/fly/agent`, reviewed against
+  Forge 2.0.15) are not compiled in CI here — `make compile` against a Forge jar
+  is the verification step; the Python bridge is covered by tests.
 
 ## Training curriculum (implemented in `train.py`)
 
@@ -137,6 +146,149 @@ make physical          # → http://127.0.0.1:8795
 # or: python3 scripts/physical_table.py --port 8795 \
 #        --checkpoint checkpoints/fly_ep50.npz --offline
 ```
+
+### Neural recognition (primary path)
+
+Cards are recognised from pixels — no per-card registration, no OCR-first
+pipeline, and no requirement to flatten the card:
+
+```
+camera frame
+  → detector            card quads: edge/structure/contrast evidence, aspect +
+                        size priors, cardness model (vision/detector.py)
+  → rectify             four-corner homography → canonical 492×688 portrait,
+                        glare-masked, tilt (0°/90°) reported (vision/rectify.py)
+  → embeddings          multi-scale card descriptor + optional CNN (dim 256,
+                        ONNX → torch → dense-head → dense fallback chain,
+                        never raises) (vision/embeddings.py)
+  → matcher             fused rank over the whole index: embedding + artwork +
+                        layout + title + collector + colour, all four
+                        rotations of the card index, calibrated confidence,
+                        same-name printings flagged ambiguous (vision/matcher.py)
+  → tracking            per-frame association (quad IoU / containment /
+                        centroid) + confidence-weighted vote window: one card
+                        in view is one track, an identity is only published
+                        after `stable_votes` agreeing frames
+  → Scryfall            set+collector lookup, local Forge image cache reused
+                        before any download (cards/scryfall.py)
+  → Forge state update  tap / zone / counters through the event engine
+```
+
+Play flow:
+
+- **Identify all** (`POST /api/vision/identify`) reads the current camera
+  frame and returns every card it can see, with the rectified crop, the
+  ranked candidates and the geometry (tilt, glare, coverage).
+- **Scan card** (`POST /api/register/frame`) keeps the one-card workflow: it
+  picks the sharpest frame of a burst, identifies it, and auto-registers a
+  confident, stable match onto the battlefield (`auto_accept_confidence`,
+  default 0.66). Uncertain matches are offered as tappable candidates.
+- **Not in library?** A recognised-but-unknown card can be confirmed with one
+  tap; confirming adds it to the recognition index (`addToIndex`) so it is
+  found instantly next time — the library grows from play, never from manual
+  data entry.
+- The vision bar under the camera (`GET /api/vision/status`, also embedded in
+  `/api/state`) shows the live index size, detector and embedder tier, and
+  offers **Build index** when none exists.
+
+Measured accuracy (synthetic benchmark, `scripts/eval_vision.py`, 300 cards
+held out from training, mixed conditions — glare, foil, sleeve, blur,
+occlusion, rotation):
+
+| Stage | Result |
+| --- | --- |
+| Recognition (rectified captures, no detector) | top-1 **54.3 %**, top-3 70.0 %, top-5 75.7 % |
+| — clean / occlusion / blur / sleeve | 60 % / 65 % / 55 % / 55 % top-1 |
+| — worst conditions (foil, glare) | 45 % top-1 |
+| Detection | recall ~0.95, corner error ≈ 20 px, ≈ 155 ms/frame |
+| End-to-end | top-1 60 % on a small scene sample, and **"unknown" instead of a wrong card** when the fused score is low |
+| Zero-training tier (no weights, `dense` descriptor) | top-1 ~15 % — training is what buys the accuracy |
+
+These are synthetic-card numbers: a real camera adds glare, foil shimmer and
+depth of field that the generator only approximates, and a real library is
+thousands of cards, not 300. Treat the table as a **co-pilot that is right most
+of the time and admits when it is not**, not as a barcode scanner — the UI
+always shows the ranked candidates and offers one-tap confirmation.
+
+Building the index:
+
+```bash
+# real cards: Scryfall bulk data + on-demand images
+.venv/bin/python scripts/physical_table.py --sync-scryfall --images 4000
+
+# offline demo library (synthetic cards, good for a first run)
+.venv/bin/python scripts/physical_table.py --build-index 64
+```
+
+Training the recogniser (optional but recommended — it lifts recognition well
+above the zero-training descriptor):
+
+```bash
+.venv/bin/python scripts/train_embedder.py --cards 400 --steps 1500
+# writes vision/weights/{embedder.pt,embedder.onnx,embedder.json,
+#                       dense_head.npz,training_report.json}
+.venv/bin/python scripts/eval_vision.py --mode all --cards 300 --calibrate
+# writes logs/eval_vision.json + vision/weights/calibration.json
+```
+
+The camera watcher runs the same pipeline continuously (analysis decoupled
+from capture, `max_analysis_fps` default 6 Hz) so taps, zone changes and new
+cards update the game state without pressing anything.
+
+### Forge owns the rules (physical → Forge mirror)
+
+The camera side observes; it never judges. Every physical fact that survives
+reconciliation is forwarded to the running Forge game, which remains the only
+rules engine in the system:
+
+```
+camera → detection → rectification → recognition/tracking
+       → physical event (card put down / turned sideways / moved zone /
+         +1/+1 counter / life changed / attacked with)
+       → flycommander/forge_table_bridge.py   (translate, spool, retry)
+       → POST /table/events  →  forge_patch/src/fly/agent  →  Forge
+       → Forge validates it, updates the real game state
+       → the fly seats and the UI read that state back (GET /observation)
+```
+
+| Piece | Where |
+| --- | --- |
+| Event → action mapping | `flycommander/forge_table_bridge.py` (`EVENT_TO_ACTION`) |
+| Wire contract | `POST /table/events`, `POST /table/state`, `GET /table/queue` |
+| Forge side | `forge_patch/src/fly/agent/{AgentServer,TableActionQueue,TableActionApplier,PhysicalTableController,TableLobbyPlayer,ForgeApi}.java` |
+| UI panel | the **forge** line under the camera (`GET /api/forge/status`, *Sync to Forge*) |
+
+Properties of the link, all covered by `tests/test_forge_bridge.py`:
+
+- **No event can fall on the floor.** Every event type in `physical/events.py`
+  is either mapped to a Forge action or explicitly listed as tracking-only,
+  and the test suite enforces that partition.
+- **Never raises, never stalls the table.** Forge may simply not be running:
+  actions spool in order (bounded, with a drop counter) and flush on the next
+  successful contact. `FLYCOMMANDER_FORGE_SYNC=0` disables the mirror;
+  `FLYCOMMANDER_FORGE_AGENT` points at a non-default agent.
+- **Idempotent.** Actions carry `actionId = <tableId>:<seq>`; Forge ignores an
+  id it has already seen, so a retried batch cannot double-apply.
+- **Honest.** Forge's verdict per action (`applied` / `rejected` + reason) is
+  reported back and shown in the UI; the bridge never claims a game action
+  happened because the camera saw something.
+- **Forge stays the judge.** Applying an action means asking Forge to perform
+  it (`moveTo`, `setTapped`, `addCounter`, `setLife`); an illegal physical move
+  is refused by Forge with a reason, not silently accepted.
+
+Run the table with a physical seat in Forge:
+
+```bash
+make compile                       # javac the patch against your Forge jar
+java -Dfly.agent.table=1 -cp "$PATCH_CLASSES:$FORGE_JAR" fly.agent.AgentMain 1 random random random random
+.venv/bin/python scripts/physical_table.py --port 8795   # same machine
+```
+
+> **Compile status:** the table-action endpoints and the applier are written
+> against the Forge 2.0.15 API surface, but this repository's CI has no Java or
+> Forge jar, so only the Python half is test-verified here. Run `make compile`;
+> all Forge API assumptions are gathered in
+> `forge_patch/src/fly/agent/ForgeApi.java` so a version bump is a one-file fix.
 
 Architecture (all under [physical/](physical/)):
 
