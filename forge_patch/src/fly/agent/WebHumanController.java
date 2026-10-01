@@ -28,7 +28,7 @@ public final class WebHumanController extends forge.player.PlayerControllerHuman
         webGui = new WebHumanGui(decisions, this);
         setGui(webGui.create());
         WebHumanSession.register(decisions);
-        publishGame();
+        // Game is still constructing its players; AgentMain publishes after createGame returns.
         System.out.println("[ForgeHuman] WebHumanController instantiated: " + player.getName());
     }
 
