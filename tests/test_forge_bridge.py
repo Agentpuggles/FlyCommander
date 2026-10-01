@@ -51,6 +51,7 @@ class FakeForgeAgent:
         self.rejected = 0
         self.recent: list[str] = []
         self._seen: set[str] = set()
+        self.get_paths: list[str] = []
         self._server: ThreadingHTTPServer | None = None
         self.port = 0
         self._thread: threading.Thread | None = None
@@ -72,6 +73,7 @@ class FakeForgeAgent:
                 self.wfile.write(body)
 
             def do_GET(self):                # noqa: N802
+                agent.get_paths.append(self.path)
                 if self.path == "/health":
                     self._json(200, {"status": "ready", "tableSeat": True})
                 elif self.path == "/table/queue":
@@ -224,13 +226,32 @@ def test_tracking_only_events_are_not_sent(agent):
 # ----------------------------------------------------------------------
 # spooling / ordering / idempotency
 # ----------------------------------------------------------------------
+def test_status_probe_uses_health_route_and_reports_running(agent):
+    bridge = ForgeTableBridge(base_url=agent.url)
+    status = bridge.status(probe=True)
+    assert status["connected"] is True
+    assert status["lastError"] is None
+    assert agent.get_paths == ["/health"]
+
+
+def test_physical_ui_refreshes_forge_health_indicator():
+    from pathlib import Path
+
+    ui = (Path(__file__).resolve().parents[1] / "physical" / "ui.html").read_text()
+    assert "void refreshForge();" in ui
+    assert 'fetch(API + "/api/forge/status"' in ui
+    assert '"🟢 running"' in ui
+    assert '"🔴 not running"' in ui
+
+
 def test_unreachable_forge_spools_without_raising():
     bridge = ForgeTableBridge(base_url="http://127.0.0.1:9", timeout=0.2)
     out = bridge.send([Event(type="card_tapped", origin="vision",
                              payload={"trackingId": "card1"})])
     assert out["status"] == "offline" and out["spooled"] == 1
-    assert bridge.status()["connected"] is False
-    assert bridge.status()["lastError"]
+    status = bridge.status(probe=True)
+    assert status["connected"] is False
+    assert status["lastError"]
 
 
 def test_spool_flushes_in_order_once_forge_returns():

@@ -70,6 +70,23 @@
   .dbgState.red { background:#3a2222; color:var(--bad); }
   .dbgGrid { font-family:ui-monospace, monospace; font-size:12px; color:#c3cbd9;
              white-space:pre-wrap; }
+  .forge-health-card { display:flex; align-items:center; flex-wrap:wrap; gap:10px;
+                       padding:10px 12px; border:1px solid var(--line);
+                       border-radius:10px; background:#171b24; }
+  .forge-health-card.online { border-color:#3f8f66; background:#1d3028; }
+  .forge-health-card.offline { border-color:#8a4a4a; background:#352323; }
+  .forge-health-card.checking { border-color:#6f5a2a; background:#332b1b; }
+  .forge-health-card.disabled { border-color:var(--line); background:#202635; }
+  .forge-health-heading { display:flex; align-items:center; gap:8px; font-weight:800; }
+  .forge-health-state { padding:3px 9px; border-radius:999px; background:#10140f;
+                        font-size:12px; white-space:nowrap; }
+  .forge-health-meta { display:flex; align-items:center; flex-wrap:wrap; gap:6px 14px;
+                       flex:1; min-width:220px; color:#c3cbd9; font-size:12px; }
+  .forge-health-meta code { color:#aeb8cb; font-size:11px; }
+  .forge-health-error { color:#ffb0a5; overflow-wrap:anywhere; }
+  .forge-retry { white-space:nowrap; }
+  @media (max-width:700px) { .forge-health-card { align-items:flex-start; }
+    .forge-health-meta { flex-basis:100%; min-width:0; } .forge-retry { margin-left:auto; } }
 </style>
 </head>
 <body>
@@ -134,7 +151,7 @@
       <button onclick="toggleDebug()">🐞</button>
     </div>
     <div id="visionBar" class="muted" style="margin:6px 0"></div>
-    <div id="forgeBar" class="muted" style="margin:6px 0"></div>
+    <div id="forgeBar" role="status" aria-live="polite" style="margin:6px 0">Checking Forge Agent health…</div>
     <div id="scanResult"></div>
     <div id="recognisedBox"></div>
     <div id="debugView" style="display:none" class="muted">
@@ -183,6 +200,7 @@ async function refresh() {
   renderBrain(s);
   renderVision(s.vision);
   renderForge(s.forge);
+  void refreshForge();
   const log = document.getElementById("eventLog");
   log.innerHTML = s.events.map(e => e.replace(/&/g,"&amp;").replace(/</g,"&lt;")).join("<br>");
 }
@@ -231,29 +249,48 @@ function renderVision(v) {
   return noVisual;
 }
 
+let forgeProbeSerial = 0;
 function renderForge(f) {
   const bar = document.getElementById("forgeBar");
-  if (!f) { bar.textContent = ""; return; }
-  if (!f.enabled) {
-    bar.innerHTML = `<b>forge</b>: <span class="muted">mirror off</span>`;
+  if (!f) {
+    bar.textContent = "Checking Forge Agent health…";
     return;
   }
-  const state = f.connected
-    ? (f.pending ? `🟡 ${f.pending} action(s) queued` : "🟢 in sync")
-    : "🔴 not running";
-  const forgeStats = f.forge
-    ? ` · forge applied ${f.forge.applied}${f.forge.rejected ? " / rejected " + f.forge.rejected : ""}`
-    : "";
-  bar.innerHTML = `<b>forge</b>: ${state} <span class="muted">${esc(f.url)} · seat ${esc(f.seat)}${forgeStats}</span>` +
-    (f.pending || f.dropped
-      ? ` <span class="muted">(physical spool ${f.pending}${f.dropped ? ", dropped " + f.dropped : ""})</span>` : "") +
-    (f.connected ? "" : ` <button onclick="refreshForge()">Retry</button>`) +
-    ` <span>Legacy mirror is not legal casting. Use the Commander pod.</span>`;
+  const enabled = f.enabled !== false;
+  const checking = enabled && !f.connected && !f.lastContact && !f.lastError;
+  const statusClass = !enabled ? "disabled" : f.connected ? "online" : checking ? "checking" : "offline";
+  const statusText = !enabled ? "⚪ disabled" : f.connected ? "🟢 running" : checking ? "🟡 checking…" : "🔴 not running";
+  const baseUrl = typeof f.url === "string" ? f.url.replace(/\/+$/, "") : "";
+  const healthTarget = baseUrl ? `${esc(baseUrl)}/health` : "unavailable";
+  const details = [];
+  if (enabled) details.push(`Health check: <code>${healthTarget}</code>`);
+  if (f.pending) details.push(`${Number(f.pending)} action(s) queued`);
+  const applied = f.forge?.applied ?? f.applied;
+  const rejected = f.forge?.rejected ?? f.rejected;
+  if (applied != null) details.push(`Applied ${Number(applied)}`);
+  if (rejected) details.push(`Rejected ${Number(rejected)}`);
+  if (!enabled) details.push("Forge mirror is disabled in settings.");
+  if (!f.connected && f.lastError) details.push(`<span class="forge-health-error">${esc(f.lastError)}</span>`);
+  bar.innerHTML = `<div class="forge-health-card ${statusClass}">` +
+    `<div class="forge-health-heading"><span>forge:</span><span class="forge-health-state">${statusText}</span></div>` +
+    `<div class="forge-health-meta">${details.join("<span aria-hidden=\"true\">·</span>")}</div>` +
+    (enabled ? `<button class="forge-retry" type="button" onclick="refreshForge()" aria-label="Check Forge Agent health now">Check again</button>` : "") +
+    `<span class="muted">Legacy mirror is not legal casting. Use the Commander pod.</span>` +
+    `</div>`;
 }
 
 async function refreshForge() {
-  const r = await (await fetch(API + "/api/forge/status")).json();
-  renderForge(r);
+  const requestId = ++forgeProbeSerial;
+  try {
+    const response = await fetch(API + "/api/forge/status", {cache:"no-store"});
+    if (!response.ok) throw new Error(`Health probe returned HTTP ${response.status}`);
+    const result = await response.json();
+    if (requestId === forgeProbeSerial) renderForge(result);
+  } catch (error) {
+    if (requestId === forgeProbeSerial) {
+      renderForge({enabled:true, connected:false, lastError:error.message});
+    }
+  }
 }
 
 async function syncForge() {
