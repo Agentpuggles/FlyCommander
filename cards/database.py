@@ -397,5 +397,25 @@ class CardDatabase:
             "scryfallRequests": self.client.request_count,
         }
 
+    def library_summary(self) -> dict[str, Any]:
+        """`stats()` plus a real-vs-synthetic breakdown.
+
+        This distinction matters to the player: a library of synthetic demo
+        cards can never recognise a real card, and the UI has to say so
+        instead of reporting a 5% "best guess" as if it were a match.
+        """
+        out = self.stats()
+        try:
+            with self.store._lock:
+                row = self.store._conn.execute(
+                    "SELECT COUNT(*) FROM cards WHERE set_name='Synthetic'"
+                ).fetchone()
+            synthetic = int(row[0]) if row else 0
+        except Exception:      # pragma: no cover - defensive (schema drift)
+            synthetic = 0
+        out["synthetic"] = synthetic
+        out["real"] = max(0, int(out.get("cards", 0)) - synthetic)
+        return out
+
     def close(self) -> None:
         self.store.close()

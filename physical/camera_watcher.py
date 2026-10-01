@@ -4,8 +4,17 @@ The single owner of /dev/video0. Every frame flows through this one capture
 loop and is fanned out from it:
 
     camera_watcher (sole V4L2 owner)
-        +--> tracker/state updates (observer.process_frame)
-        +--> MJPEG preview stream (snapshot_jpeg / debug_snapshot)
+        +--> capture thread  ......... reads at the device rate, nothing else
+        +--> analysis thread ......... detection/recognition (analysis_fps)
+        +--> preview thread  ......... downscaled MJPEG encode (preview_fps)
+
+Decoupling is deliberate and is the fix for a choppy/laggy preview: the
+analysis pass (detection + rectification + embedding) costs far more than one
+frame period, and the JPEG encode is not free either. When both ran inline in
+the capture loop they throttled it to a few Hz, OpenCV's V4L2 queue filled,
+and every frame handed to the browser was the *oldest* queued one — smooth
+30 FPS in, laggy 4 FPS out. Now capture never waits for anything, and the
+queue depth is 1, so the preview is always the newest frame.
 
 No other component may open the device. OCR/identification never happens
 here — only on explicit Scan requests (server.scan_frames), which reuse the
@@ -37,7 +46,33 @@ from physical.observer import PhysicalObserver
 from physical.tracker import Detection
 
 _REOPEN_BACKOFF_S = 5.0
-_PREVIEW_INTERVAL_S = 0.10          # MJPEG preview cadence (~10 FPS encode)
+
+
+class _RateMeter:
+    """Rolling events-per-second estimate (windowed on the monotonic clock)."""
+
+    def __init__(self, window_s: float = 4.0) -> None:
+        self.window_s = window_s
+        self._stamps: list[float] = []
+        self._lock = threading.Lock()
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._stamps.append(now)
+            cutoff = now - self.window_s
+            while self._stamps and self._stamps[0] < cutoff:
+                self._stamps.pop(0)
+
+    @property
+    def rate(self) -> float:
+        with self._lock:
+            if len(self._stamps) < 2:
+                return 0.0
+            span = self._stamps[-1] - self._stamps[0]
+            if span <= 0:
+                return 0.0
+            return (len(self._stamps) - 1) / span
 
 
 class CameraWatcher:
@@ -52,8 +87,10 @@ class CameraWatcher:
     def __init__(self, observer: PhysicalObserver,
                  settings: Any | None = None,
                  config_path: str | None = None,
-                 fps_target: float = 5.0,
-                 recognizer: Any | None = None) -> None:
+                 fps_target: float | None = None,
+                 recognizer: Any | None = None,
+                 preview_fps: float | None = None,
+                 preview_width: int | None = None) -> None:
         from physical.camera_config import load_camera_settings  # local: avoids import cycles
         self.observer = observer
         # neural recognition pipeline (physical/vision_pipeline.CardRecognizer).
@@ -66,7 +103,16 @@ class CameraWatcher:
         self.device_index = self.settings.device          # back-compat alias
         self.width = self.settings.width
         self.height = self.settings.height
-        self.interval = 1.0 / fps_target                  # analysis cadence, not capture rate
+        # cadences: capture runs at the device rate, analysis and preview at
+        # their own (configurable) rates — never coupled to each other.
+        self.analysis_fps = float(fps_target or self.settings.analysis_fps)
+        self.interval = 1.0 / self.analysis_fps
+        self.preview_fps = float(preview_fps or self.settings.preview_fps)
+        self.preview_interval = 1.0 / max(0.5, self.preview_fps)
+        self.preview_width = int(preview_width if preview_width is not None
+                                 else self.settings.preview_width)
+        self.preview_quality = int(self.settings.preview_quality)
+        self.analysis_width = int(self.settings.analysis_width)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._open_attempts = 0        # consecutive failed opens (backoff)
@@ -80,12 +126,20 @@ class CameraWatcher:
         self._last_jpeg: bytes | None = None              # cached MJPEG preview payload
         self._preview_seq = 0                             # increments per NEW preview frame
         self._last_preview_t = 0.0                        # last preview encode time
+        self._last_capture_s = 0.0                        # last read() cost (seconds)
         self._timings: dict[str, float] = {}
+        self._capture_rate = _RateMeter()
+        self._analysis_rate = _RateMeter()
+        self._preview_rate = _RateMeter()
         self.stats: dict[str, Any] = {
             "running": False, "frames": 0, "cardsSeen": 0,
             "lastError": "", "quality": None, "cameraReady": False,
-            "diagnostics": None, "fpsTarget": fps_target,
+            "diagnostics": None, "fpsTarget": self.analysis_fps,
             "grabFailures": 0, "stallEvents": 0,
+            # per-thread health (visible in the debug panel)
+            "captureFps": 0.0, "analysisHz": 0.0, "previewHz": 0.0,
+            "previewMs": 0.0, "analysisMs": 0.0, "captureMs": 0.0,
+            "analysisSkips": 0, "previewWidth": self.preview_width,
         }
 
     # ------------------------------------------------------------------
@@ -132,17 +186,23 @@ class CameraWatcher:
         with self._frame_lock:
             return self._last_jpeg, self._preview_seq
 
-    def snapshot_jpeg(self) -> bytes | None:
-        """Latest raw frame as JPEG bytes (for the UI stream)."""
+    def snapshot_jpeg(self, quality: int | None = None) -> bytes | None:
+        """Latest frame as JPEG bytes, at full camera resolution.
+
+        The *stream* is downscaled on purpose (see `_encode_preview`); a
+        one-off snapshot is the one place where the full frame is wanted.
+        """
         with self._frame_lock:
-            jpeg = self._last_jpeg
             if self._last_frame is None:
                 return None
-        if jpeg is not None:
-            return jpeg
-        import cv2
-        ok, buf = cv2.imencode(".jpg", self._last_frame,
-                               [cv2.IMWRITE_JPEG_QUALITY, 70])
+            frame = self._last_frame
+        try:
+            import cv2
+            ok, buf = cv2.imencode(
+                ".jpg", frame,
+                [cv2.IMWRITE_JPEG_QUALITY, int(quality or 85)])
+        except Exception:
+            return None
         return buf.tobytes() if ok else None
 
     def last_analysis(self) -> dict[str, Any] | None:
@@ -151,9 +211,25 @@ class CameraWatcher:
             return dict(self._last_analysis) if self._last_analysis else None
 
     def timings(self) -> dict[str, float]:
-        """Latest per-stage timings in ms (capture/analysis/tracker/preview)."""
+        """Latest per-stage timings in ms + per-thread rates.
+
+        captureMs/analysisMs/trackerMs come from the analysis pass;
+        previewMs and the *Hz numbers are measured per thread, which is what
+        makes a "the preview is choppy" report diagnosable at a glance.
+        """
         with self._frame_lock:
-            return dict(self._timings)
+            out = dict(self._timings)
+        live = {
+            "previewMs": self.stats.get("previewMs", 0.0),
+            "captureFps": self.stats.get("captureFps", 0.0),
+            "analysisHz": self.stats.get("analysisHz", 0.0),
+            "previewHz": self.stats.get("previewHz", 0.0),
+            "analysisSkips": self.stats.get("analysisSkips", 0),
+        }
+        if not out and not any(live.values()):
+            return {}          # nothing has run yet — "no analysis" stays empty
+        out.update(live)
+        return out
 
     def camera_settings(self) -> dict[str, Any]:
         return self.settings.to_dict()
@@ -203,73 +279,168 @@ class CameraWatcher:
                   flush=True)
             print("[camera] " + cam.diag.describe().replace("\n", "\n[camera] "),
                   flush=True)
-            watchdog = Watchdog()
+            print(f"[camera] threads: capture @ device rate · analysis "
+                  f"@ {self.analysis_fps:g} Hz · preview @ {self.preview_fps:g} Hz"
+                  + (f" ({self.preview_width}px)" if self.preview_width else ""),
+                  flush=True)
 
-            # CAPTURE at the device's native rate (a read costs ~5 ms); run
-            # the (heavier) analysis only every self.interval seconds. This
-            # keeps measured_fps a TRUE device rate — the watchdog compares
-            # it against MIN_ACCEPTABLE_FPS with real meaning — and keeps
-            # the freshest possible frame for bursts and the preview.
-            last_analysis_t = 0.0
+            # Three threads, one camera: capture never blocks on analysis or
+            # encoding, so the preview stays live even when recognition is
+            # expensive (see the module docstring).
+            session = threading.Event()
+            workers = [
+                threading.Thread(target=self._analysis_loop, args=(session,),
+                                 name="camera-analysis", daemon=True),
+                threading.Thread(target=self._preview_loop, args=(session,),
+                                 name="camera-preview", daemon=True),
+            ]
+            for t in workers:
+                t.start()
             try:
-                while not stop.is_set():
-                    t_loop = time.time()
-                    ok, frame = cam.read()
-                    t_capture = time.time() - t_loop
-                    if not ok:
-                        self.stats["grabFailures"] += 1
-                        self.stats["lastError"] = (
-                            f"frame grab failed ({self.stats['grabFailures']} consecutive)")
-                        time.sleep(0.5)
-                        # do NOT renegotiate mid-session: keep the single-owner
-                        # device open, ride out USB hiccups, serve the last frame
-                        continue
-
-                    self.stats["grabFailures"] = 0
-                    self.stats["frames"] += 1
-                    with self._frame_lock:
-                        self._last_frame = frame
-                        self._frame_seq += 1
-
-                    # live FPS watchdog: true capture rate; count the event,
-                    # never renegotiate mid-session
-                    measured = cam.measured_fps
-                    if watchdog.update(measured):
-                        self.stats["stallEvents"] += 1
-                        self.stats["lastError"] = (
-                            f"camera FPS collapsed to {measured:.1f} "
-                            f"(stall #{self.stats['stallEvents']})")
-
-                    # ---- analysis cadence (fps_target, ~5 Hz): quality,
-                    # detection, tracker update ----
-                    if t_loop - last_analysis_t >= self.interval:
-                        last_analysis_t = t_loop
-                        self._analyze_and_track(frame, cam, t_loop, t_capture)
-
-                    # ---- MJPEG preview: throttle heavy JPEG encode into
-                    # its own cadence (~4 FPS) ----
-                    t2 = time.time()
-                    if t2 - self._last_preview_t >= _PREVIEW_INTERVAL_S:
-                        try:
-                            import cv2
-                            ok_j, buf = cv2.imencode(
-                                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                            if ok_j:
-                                with self._frame_lock:
-                                    self._last_jpeg = buf.tobytes()
-                                    self._preview_seq += 1
-                        except Exception:
-                            pass  # preview encoding must never kill capture
-                        self._last_preview_t = t2
-
-                    time.sleep(0.005)   # poll cadence; read() blocks on the camera anyway
+                self._capture_loop(cam, session)
             finally:
+                session.set()
+                for t in workers:
+                    t.join(timeout=5.0)
                 cam.close()
                 self._cam = None
                 self.stats["running"] = False
                 self.stats["cameraReady"] = False
+                self.stats["captureFps"] = 0.0
+                self.stats["analysisHz"] = 0.0
+                self.stats["previewHz"] = 0.0
             if not stop.is_set() and self.stats.get("lastError"):
                 stop.wait(_REOPEN_BACKOFF_S)
+
+    # ------------------------------------------------------------------
+    # the three loops
+    # ------------------------------------------------------------------
+    def _capture_loop(self, cam: CameraCapture, session: threading.Event) -> None:
+        """Sole reader of the device: grab, publish, repeat. Nothing else.
+
+        Deliberately dumb and fast — no analysis, no encoding — so the device
+        is drained at its native rate and the published frame is always the
+        newest one (queue depth is 1, see camera.CameraCapture.open).
+        """
+        stop = self._stop
+        watchdog = Watchdog()
+        while not (stop.is_set() or session.is_set()):
+            t_loop = time.time()
+            ok, frame = cam.read()
+            t_capture = time.time() - t_loop
+            if not ok:
+                self.stats["grabFailures"] += 1
+                self.stats["lastError"] = (
+                    f"frame grab failed ({self.stats['grabFailures']} consecutive)")
+                # do NOT renegotiate mid-session: keep the single-owner
+                # device open, ride out USB hiccups, serve the last frame
+                stop.wait(0.5)
+                continue
+
+            self.stats["grabFailures"] = 0
+            self.stats["frames"] += 1
+            with self._frame_lock:
+                self._last_frame = frame
+                self._frame_seq += 1
+            self._last_capture_s = t_capture
+            self._capture_rate.tick()
+            self.stats["captureFps"] = round(self._capture_rate.rate, 1)
+            self.stats["captureMs"] = round(t_capture * 1000, 1)
+
+            # live FPS watchdog: true capture rate; count the event,
+            # never renegotiate mid-session
+            measured = cam.measured_fps
+            if watchdog.update(measured):
+                self.stats["stallEvents"] += 1
+                self.stats["lastError"] = (
+                    f"camera FPS collapsed to {measured:.1f} "
+                    f"(stall #{self.stats['stallEvents']})")
+
+            stop.wait(0.001)   # yield; read() blocks on the camera anyway
+
+    def _analysis_loop(self, session: threading.Event) -> None:
+        """Detection/recognition at analysis_fps (never at capture rate).
+
+        A slow pass simply means the next one starts late — the capture loop
+        keeps running at full speed either way.
+        """
+        stop = self._stop
+        next_t = 0.0
+        last_seq = -1
+        while not (stop.is_set() or session.is_set()):
+            now = time.monotonic()
+            if now < next_t:
+                stop.wait(min(0.05, next_t - now))
+                continue
+            frame, seq = self._latest_frame()
+            if frame is None or seq == last_seq:
+                # no fresh frame yet (camera slower than the cadence)
+                if frame is not None:
+                    self.stats["analysisSkips"] += 1
+                stop.wait(0.02)
+                continue
+            last_seq = seq
+            t0 = time.time()
+            try:
+                self._analyze_and_track(frame, self._cam, t_loop=t0,
+                                        t_capture=self._last_capture_s)
+            except Exception as exc:      # never kill the analysis thread
+                print(f"[camera] analysis failed: {type(exc).__name__}: {exc}",
+                      flush=True)
+            self._analysis_rate.tick()
+            self.stats["analysisHz"] = round(self._analysis_rate.rate, 1)
+            self.stats["analysisMs"] = round((time.time() - t0) * 1000, 1)
+            next_t = max(time.monotonic(), next_t + self.interval)
+
+    def _preview_loop(self, session: threading.Event) -> None:
+        """MJPEG preview at preview_fps, encoded from a downscaled copy."""
+        stop = self._stop
+        next_t = 0.0
+        last_seq = -1
+        while not (stop.is_set() or session.is_set()):
+            now = time.monotonic()
+            if now < next_t:
+                stop.wait(min(0.02, next_t - now))
+                continue
+            frame, seq = self._latest_frame()
+            if frame is None or seq == last_seq:
+                stop.wait(0.01)
+                continue
+            last_seq = seq
+            t0 = time.time()
+            try:
+                jpeg = self._encode_preview(frame)
+                if jpeg is not None:
+                    with self._frame_lock:
+                        self._last_jpeg = jpeg
+                        self._preview_seq += 1
+                    self._preview_rate.tick()
+            except Exception:
+                pass      # preview encoding must never kill the stream
+            self._last_preview_t = time.time()
+            self.stats["previewMs"] = round((time.time() - t0) * 1000, 1)
+            self.stats["previewHz"] = round(self._preview_rate.rate, 1)
+            next_t = max(time.monotonic(), now + self.preview_interval)
+
+    def _latest_frame(self) -> tuple[Any, int]:
+        with self._frame_lock:
+            return self._last_frame, self._frame_seq
+
+    def _encode_preview(self, frame) -> bytes | None:
+        """Downscale (INTER_AREA) then encode — cheaper and just as legible."""
+        import cv2
+
+        img = frame
+        width = self.preview_width
+        if width and frame is not None:
+            h, w = frame.shape[:2]
+            if w > width:
+                h2 = max(1, int(round(h * (width / float(w)))))
+                img = cv2.resize(frame, (width, h2),
+                                 interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img,
+                               [cv2.IMWRITE_JPEG_QUALITY, self.preview_quality])
+        return buf.tobytes() if ok else None
 
     # ------------------------------------------------------------------
     def _open_camera(self) -> bool:
@@ -354,12 +525,13 @@ class CameraWatcher:
             self.stats["cardsSeen"] += 1
         return detections
 
-    def _analyze_and_track(self, frame, cam: CameraCapture,
-                           t_loop: float, t_capture: float) -> None:
+    def _analyze_and_track(self, frame, cam: CameraCapture | None = None,
+                           t_loop: float = 0.0, t_capture: float = 0.0) -> None:
         """One analysis pass: quality gate -> detection -> tracker update.
 
-        Runs at the analysis cadence (~5 Hz), never at capture rate. Timings
-        land in stats/debug-info per stage (capture | analysis | tracker).
+        Runs on the analysis thread at the analysis cadence (~5 Hz by
+        default), never at capture rate. Timings land in stats/debug-info per
+        stage (capture | analysis | tracker).
         """
         t0 = time.time()
         q = score_frame_quality(frame)
@@ -423,15 +595,30 @@ class CameraWatcher:
 
         return analyze_frame(frame, quality=quality)
 
-    def _neural_analysis(self, frame, cam: CameraCapture, quality) -> dict[str, Any]:
+    def _neural_analysis(self, frame, cam: CameraCapture | None, quality) -> dict[str, Any]:
         """Detection + perspective correction + recognition for one frame.
 
         The result keeps the legacy keys the UI and observer understand
         (state/card_detected/reason/candidates/best_candidate) and adds the
         full neural payload under `cards` / `pipeline` / `timings`.
+
+        When ``analysis_width`` is configured (> 0) the frame is downscaled
+        before detection — the single biggest lever on a slow machine — and
+        the returned geometry (bbox/quad) is scaled back to camera pixels so
+        tracking and the debug overlay stay in the same coordinate space.
         """
-        scene = self.recognizer.recognize(frame)
+        scale = 1.0
+        vision_frame = frame
+        if self.analysis_width and frame is not None and frame.shape[1] > self.analysis_width:
+            import cv2
+            scale = self.analysis_width / float(frame.shape[1])
+            vision_frame = cv2.resize(frame, None, fx=scale, fy=scale,
+                                      interpolation=cv2.INTER_AREA)
+        scene = self.recognizer.recognize(vision_frame)
         cards = scene.cards
+        # NOTE: the recognizer's tracks own their quads (they are matched
+        # across frames), so a downscaled analysis frame is corrected on the
+        # way OUT (in the dicts below) and never by mutating the tracks.
         best = scene.best()
         top_conf = best.confidence if best else 0.0
         if not cards:
@@ -446,14 +633,25 @@ class CameraWatcher:
                       f"{best.top.name} ({best.top.confidence:.0%})")
         else:
             reason = f"{len(cards)} card(s) detected"
+        card_dicts = [c.to_dict() for c in cards]
+        if scale != 1.0:
+            inv = 1.0 / scale
+            for d in card_dicts:
+                bbox = d.get("bbox")
+                if isinstance(bbox, list) and len(bbox) == 4:
+                    d["bbox"] = [round(float(v) * inv, 1) for v in bbox]
+                quad = d.get("quad")
+                if isinstance(quad, list):
+                    d["quad"] = [[round(float(x) * inv, 1),
+                                  round(float(y) * inv, 1)] for x, y in quad]
         analysis: dict[str, Any] = {
             "state": "card_detected" if cards else "no_card",
             "card_detected": bool(cards),
             "confidence": top_conf,
             "reason": reason,
-            "candidates": [c.to_dict() for c in cards],
-            "best_candidate": cards[0].to_dict() if cards else None,
-            "cards": [c.to_dict() for c in cards],
+            "candidates": card_dicts,
+            "best_candidate": card_dicts[0] if card_dicts else None,
+            "cards": card_dicts,
             "multiple_cards": len(cards) > 1,
             "pipeline": "neural",
             "indexSize": scene.index_size,
@@ -461,10 +659,14 @@ class CameraWatcher:
             "timings": scene.timings,
             "quality": quality.to_dict(),
         }
+        if scale != 1.0:
+            analysis["analysisScale"] = round(scale, 3)
         self.stats["cardsSeen"] = self.stats.get("cardsSeen", 0) + len(cards)
         return analysis
 
-    def _camera_summary(self, cam: CameraCapture) -> dict[str, Any]:
+    def _camera_summary(self, cam: CameraCapture | None) -> dict[str, Any]:
+        if cam is None:
+            return {}
         d = cam.diag
         return {
             "device": d.device, "format": d.format,

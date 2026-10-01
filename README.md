@@ -187,6 +187,32 @@ Play flow:
   tap; confirming adds it to the recognition index (`addToIndex`) so it is
   found instantly next time — the library grows from play, never from manual
   data entry.
+
+### How a card actually gets identified (three tiers, honest failures)
+
+The visual index is the fast path, but it only works for cards it has seen.
+A scan therefore falls through three tiers, and each one is allowed to say
+"I don't know" — a 5 % neighbour from a demo library is noise, not a
+suggestion, and it is never offered as a tappable choice
+(`min_offer_confidence`, default 0.20):
+
+1. **Visual index** — detector → rectify → embedding → rank. Used when the
+   match clears `suggest_confidence` (0.35) and the matcher does not flag it
+   `unknown`.
+2. **OCR + Scryfall rescue** — when the visual match is weak or unknown, the
+   scan reads the card's *own text* (name and collector line, on the
+   perspective-corrected crop) and asks Scryfall by name. This needs no image
+   library at all, which is what makes a real card playable on a fresh table
+   with only the synthetic demo library installed. Confident answers
+   (≥ `ocr_auto_accept_confidence`, 0.60) register directly; weaker ones are
+   offered as candidates. Runs on an explicit Scan only — never per frame.
+3. **Add by name** — the player types `gitrog monster`; Scryfall's fuzzy
+   endpoint tolerates typos and partial names, and every answer is cached so
+   the same card resolves offline next time (`POST /api/register/name`).
+
+The UI always says where a name came from: *closest in library (visual)*,
+*name (OCR)*, or the player's own typing — so a low-confidence library guess
+can never be mistaken for what the camera read.
 - The vision bar under the camera (`GET /api/vision/status`, also embedded in
   `/api/state`) shows the live index size, detector and embedder tier, and
   offers **Build index** when none exists.
@@ -231,9 +257,14 @@ above the zero-training descriptor):
 # writes logs/eval_vision.json + vision/weights/calibration.json
 ```
 
-The camera watcher runs the same pipeline continuously (analysis decoupled
-from capture, `max_analysis_fps` default 6 Hz) so taps, zone changes and new
-cards update the game state without pressing anything.
+The camera watcher runs the same pipeline continuously so taps, zone changes
+and new cards update the game state without pressing anything. It uses three
+threads — **capture** (reads at the device rate and nothing else),
+**analysis** (detection + matching, 5 Hz by default) and **preview** (MJPEG
+encode, 15 Hz on a downscaled copy) — plus a depth-1 V4L2 queue, so an
+expensive recognition pass can never make the preview choppy or stale. The 🐞
+debug panel shows all three rates; if the preview is choppy while capture is
+at the device rate, the bottleneck is the encode, not the camera.
 
 ### Forge owns the rules (physical → Forge mirror)
 
@@ -375,9 +406,24 @@ server-owned camera (V4L2, MJPG 1920x1080@30, verified negotiation)
   | `camera_fps` | `30` | requested frame rate |
   | `camera_format` | `MJPG` | FOURCC; `MJPEG`/`JPG`/`MPEG` are normalized to `MJPG` |
 
+  Pipeline knobs (capture / analysis / preview run on three separate threads,
+  so these tune *their* cadences and never throttle the camera):
+
+  | Key | Default | Meaning |
+  | --- | --- | --- |
+  | `camera_buffer_size` | `1` | V4L2 queue depth. `1` = every read returns the **newest** frame; the OpenCV default (4+) hands a 5 Hz consumer frames the camera captured half a second ago, which is what a "laggy" preview really is |
+  | `preview_width` | `960` | the MJPEG preview is downscaled (INTER_AREA) before encoding — a 1080p JPEG encode costs ~20 ms and buys nothing on a browser-sized `<img>` |
+  | `preview_fps` | `15` | preview encode cadence (this is the stream's frame rate) |
+  | `preview_quality` | `70` | JPEG quality of the preview stream |
+  | `analysis_fps` | `5` | detection + rectification + matching cadence |
+  | `analysis_width` | `0` | analyse a downscaled frame (`0` = native). The single biggest lever on a slow machine — try `1280` if recognition is the bottleneck |
+
   Env equivalents: `FLYCOMMANDER_CAMERA_DEVICE`, `FLYCOMMANDER_CAMERA_WIDTH`,
   `FLYCOMMANDER_CAMERA_HEIGHT`, `FLYCOMMANDER_CAMERA_FPS`,
-  `FLYCOMMANDER_CAMERA_FORMAT`. Inspect the effective settings without
+  `FLYCOMMANDER_CAMERA_FORMAT`, `FLYCOMMANDER_CAMERA_BUFFER_SIZE`,
+  `FLYCOMMANDER_CAMERA_PREVIEW_WIDTH`, `FLYCOMMANDER_CAMERA_PREVIEW_FPS`,
+  `FLYCOMMANDER_CAMERA_PREVIEW_QUALITY`, `FLYCOMMANDER_CAMERA_ANALYSIS_FPS`,
+  `FLYCOMMANDER_CAMERA_ANALYSIS_WIDTH`. Inspect the effective settings without
   starting the server:
 
   ```bash

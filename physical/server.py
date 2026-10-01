@@ -12,6 +12,7 @@ Endpoints:
   POST /api/pending/confirm  confirm pending[i]
   POST /api/pending/reject   reject pending[i]
   POST /api/register         manual registration {"set","collectorNumber"}
+  POST /api/register/name    registration by card name (Scryfall fuzzy lookup)
   POST /api/brain/decide     ask the fly for a decision now
   GET  /api/vision/status    recognition index / detector / embedder state
   POST /api/vision/identify  identify every card in the current frame
@@ -84,6 +85,7 @@ class PhysicalTableApp:
                                          allow_network=allow_network)
         self.last_scan: dict | None = None   # debug payload for the UI
         self.last_scan_timings: dict[str, float] = {}  # ocrMs / identifyMs
+        self._last_index_save = 0.0          # index writes are debounced
         # continuous tap/presence tracking (no OCR in this loop)
         from physical.observer import PhysicalObserver
         from physical.tracker import CardTracker
@@ -143,6 +145,10 @@ class PhysicalTableApp:
         """Index/embedder/detector state for the UI vision panel."""
         status = self.recognizer.status()
         status["cards"] = self.card_db.stats()
+        status["library"] = self.card_db.library_summary()
+        # the fallback path: when the visual library cannot name a card, the
+        # scan OCRs it and asks Scryfall. Say so when that is unavailable.
+        status["ocrAvailable"] = bool(SCAN_AVAILABLE)
         status["recognition"] = self.last_recognition
         status["lastScene"] = (self.recognizer.last_scene.to_dict(include_images=False)
                                if self.recognizer.last_scene else None)
@@ -309,9 +315,42 @@ class PhysicalTableApp:
             cardType=result.card_type, basePower=result.base_power,
             baseToughness=result.base_toughness, zone=zone,
             controller="player", confidence=result.confidence)
-        return {"status": "ok", **reg, "name": result.name,
-                "set": result.set_code,
+        return {"status": "ok",
+                **{k: v for k, v in reg.items() if k != "status"},
+                "name": result.name, "set": result.set_code,
                 "collectorNumber": result.collector_number}
+
+    def register_by_name(self, name: str, zone: str = "battlefield") -> dict:
+        """Register a card the player typed ("the gitrog monster").
+
+        The honest escape hatch: when the camera, the library and the OCR all
+        fail, the player still knows what they played. Scryfall's fuzzy name
+        endpoint tolerates typos and partial names, and every answer is
+        cached so the same card works offline next time.
+        """
+        name = str(name or "").strip()
+        if len(name) < 3:
+            return {"status": "error", "error": "name is too short"}
+        info = None
+        local = self.identifier.local_name_match(name)
+        if local:
+            info = local[0]
+        if info is None and self.identifier.allow_network:
+            info = self.identifier.fuzzy_by_name(name)
+        if info is None:
+            hint = "" if self.identifier.allow_network else " (offline: no cached match)"
+            return {"status": "error",
+                    "error": f"no Scryfall card matching {name!r}{hint}"}
+        reg = self.engine.apply_player(
+            "card_registered", name=info.name, set=info.set_code,
+            collectorNumber=info.collector_number, cardType=info.card_type,
+            basePower=info.base_power, baseToughness=info.base_toughness,
+            zone=zone, controller="player", confidence=0.9)
+        return {"status": "ok",
+                **{k: v for k, v in reg.items() if k != "status"},
+                "name": info.name, "set": info.set_code,
+                "collectorNumber": info.collector_number,
+                "cardType": info.card_type}
 
     # ------------------------------------------------------------------
     # multi-signal registration (success-first)
@@ -490,53 +529,55 @@ class PhysicalTableApp:
             "ocr": ocr,
             "evidence": ev.to_dict(),
         }
-        self._last_candidates = candidates  # for the WHICH CARD? chooser
-
+        # Same honesty rule as the neural path: a sub-floor neighbour is not a
+        # suggestion (and the chooser's index must match what the UI lists).
+        offerable = [c for c in candidates
+                     if c.combined_confidence
+                     >= self.vision_config.min_offer_confidence]
+        self._last_candidates = offerable   # for the WHICH CARD? chooser
+        evidence = ev.to_dict()
+        evidence["source"] = ("ocr-name" if ev.name_raw
+                              else ("ocr-collector" if ev.collector_number
+                                    else ""))
         result: dict = {
-            "status": "ok" if candidates else "no_candidates",
+            "status": "ok" if offerable else "no_candidates",
             "state": state,
             "card_detected": True,
             "confidence": analysis["confidence"],
-            "candidates": [c.to_dict() for c in candidates[:5]],
-            "evidence": ev.to_dict(),
-            "message": ("" if candidates else
-                        "Card seen but not identified — try Retry Scan or manual entry"),
+            "candidates": [c.to_dict() for c in offerable[:5]],
+            "evidence": evidence,
+            "message": ("" if offerable else
+                        "Card seen but not identified — type the name below, "
+                        "or use set + #"),
         }
-        if not candidates:
+        if not offerable:
             result.update({k: v for k, v in self.last_scan.items()
                            if k in ("rectifiedCard", "nameCrop", "collectorCrop")})
         # auto-register the confident top candidate — but never duplicate a
         # card already on the battlefield (Commander is singleton)
-        if candidates and candidates[0].combined_confidence >= 0.60:
-            top = candidates[0]
-            existing = next((o for o in self.state.battlefield("player")
-                             if o.name.lower() == top.name.lower()), None)
-            if existing is not None:
-                result["registered"] = {"trackingId": existing.tracking_id,
-                                        "name": existing.name,
-                                        "duplicate": True}
-                state_id = existing.tracking_id
-            else:
-                self.forge.remember_track(
-                    best.track_id or "",
-                    name=top.name, set_code=top.set_code,
-                    collector_number=str(top.collector_number),
-                    oracle_id=getattr(top, "oracle_id", None))
-                reg = self.engine.apply_player(
-                    "card_registered", name=top.name, set=top.set_code,
-                    collectorNumber=top.collector_number,
-                    cardType=top.card_type, basePower=top.base_power,
-                    baseToughness=top.base_toughness, zone="battlefield",
-                    controller="player", confidence=top.combined_confidence)
-                result["registered"] = {**reg, "name": top.name}
-                state_id = reg.get("trackingId")
-            # bind to the freshest live vision track so tap events flow
-            if state_id:
-                tracks = self.observer.tracker_tracks_snapshot()
-                if tracks:
-                    newest = min(tracks, key=lambda t: t.get("ageFrames", 0))
-                    self.observer.bind(newest["trackId"], state_id)
+        if (offerable
+                and offerable[0].combined_confidence
+                >= self.vision_config.ocr_auto_accept_confidence):
+            top = offerable[0]
+            result["registered"] = self._register_identified(
+                name=top.name, set_code=top.set_code,
+                number=str(top.collector_number), card_type=top.card_type,
+                power=top.base_power, toughness=top.base_toughness,
+                confidence=top.combined_confidence,
+                track_id=self._freshest_track_id(),
+                oracle_id=getattr(top, "oracle_id", ""))
         return result
+
+    def _freshest_track_id(self) -> str:
+        """Most recently updated live vision track (for tap-event binding)."""
+        try:
+            tracks = self.observer.tracker_tracks_snapshot()
+        except Exception:      # pragma: no cover - defensive
+            return ""
+        if not tracks:
+            return ""
+        newest = min(tracks, key=lambda t: t.get("ageFrames", 0))
+        return str(newest.get("trackId", ""))
 
     def scan_frames_neural(self, images_b64: list[str] | None = None) -> dict | None:
         """Neural scan path: identify the best card in the frame and offer it.
@@ -581,7 +622,7 @@ class PhysicalTableApp:
                     "analysis": scene.to_dict()}
         # the *identity* candidates for the card being scanned (what the UI
         # and the WHICH CARD? chooser need), plus the other cards in view
-        candidates = [c.to_dict() for c in best.match.candidates[:5]]
+        candidates: list[dict] = [c.to_dict() for c in best.match.candidates[:5]]
         for cand in candidates:
             cand["trackId"] = best.track_id
             cand["stable"] = bool(best.stable_key == cand.get("set", "").lower()
@@ -589,6 +630,40 @@ class PhysicalTableApp:
         other_cards = [c.to_dict(include_image=False) for c in scene.cards
                        if c is not best]
         top = best.top
+
+        # ---- OCR rescue -------------------------------------------------
+        # A demo/synthetic library (or an untrained embedder) can never name
+        # a real card, and saying "5% Storm Voyager" is worse than useless.
+        # When the visual match is weak or unknown, read the card's own text
+        # and ask Scryfall by name: that path works with no image library at
+        # all, which is how a real card gets onto the table.
+        weak_visual = (top is None or best.match.unknown
+                       or top.confidence < self.vision_config.suggest_confidence)
+        rescue: dict = {}
+        ocr_candidates: list = []
+        if weak_visual and self.vision_config.ocr_rescue and SCAN_AVAILABLE:
+            rescue = self._ocr_rescue_scan(best)
+            ocr_candidates = list(rescue.get("candidates") or [])
+
+        # ---- one ranked list, then never offer junk ----------------------
+        # A 5% neighbour from a 48-card demo library is not a suggestion, it
+        # is noise with a Select button: only candidates that clear the floor
+        # reach the WHICH CARD? chooser. The *same* list (same order) backs
+        # both the UI and register_candidate(index).
+        all_ranked = self._merge_candidates(candidates, ocr_candidates)
+        # `unknown` is the matcher saying "the closest card in the library is
+        # NOT this card" — offering that same card as a pick would contradict
+        # our own pipeline, so only OCR/name evidence can rescue those. (The
+        # closest card is still reported, as a diagnostic, in the message.)
+        offer_pool = (all_ranked if not best.match.unknown
+                      else [c for c in all_ranked if not isinstance(c, dict)])
+        ranked = [c for c in offer_pool
+                  if self._candidate_confidence(c)
+                  >= self.vision_config.min_offer_confidence]
+        self._last_candidates = ranked
+        candidates = [c if isinstance(c, dict) else c.to_dict() for c in ranked]
+        offerable = candidates
+
         # a stable, confident identity auto-registers (singleton rule applies)
         registered = None
         # an explicit scan (frames supplied by the UI) is an intentional
@@ -599,59 +674,220 @@ class PhysicalTableApp:
         if (top is not None and not best.match.unknown
                 and top.confidence >= self.vision_config.auto_accept_confidence
                 and stable_enough):
-            existing = next((o for o in self.state.battlefield("player")
-                             if o.name.lower() == top.name.lower()), None)
-            if existing is not None:
-                registered = {"trackingId": existing.tracking_id,
-                              "name": existing.name, "duplicate": True}
-            else:
-                self.forge.remember_track(
-                    best.track_id or "",
-                    name=top.name, set_code=top.set_code,
-                    collector_number=str(top.collector_number),
-                    oracle_id=getattr(top, "oracle_id", None))
-                reg = self.engine.apply_player(
-                    "card_registered", name=top.name, set=top.set_code,
-                    collectorNumber=top.collector_number,
-                    cardType=getattr(top, "type_line", "") or "",
-                    zone="battlefield",
-                    controller="player", confidence=top.confidence)
-                registered = {**reg, "name": top.name}
-            if registered and registered.get("trackingId"):
-                self.observer.bind(best.track_id, registered["trackingId"])
+            registered = self._register_identified(
+                name=top.name, set_code=top.set_code,
+                number=str(top.collector_number),
+                card_type=getattr(top, "type_line", "") or "",
+                confidence=top.confidence, track_id=best.track_id,
+                oracle_id=getattr(top, "oracle_id", None))
+            if not registered.get("duplicate"):
+                self._remember_card_image(getattr(best.rectified, "image", None),
+                                          top.name, top.set_code,
+                                          str(top.collector_number))
+        elif ocr_candidates:
+            # the OCR name path identified it (usually a real card that the
+            # visual library has never seen)
+            best_ocr = max(ocr_candidates,
+                           key=lambda c: getattr(c, "combined_confidence", 0.0))
+            if (getattr(best_ocr, "combined_confidence", 0.0)
+                    >= self.vision_config.ocr_auto_accept_confidence):
+                registered = self._register_identified(
+                    name=best_ocr.name, set_code=best_ocr.set_code,
+                    number=str(best_ocr.collector_number),
+                    card_type=getattr(best_ocr, "card_type", "") or "",
+                    confidence=best_ocr.combined_confidence,
+                    track_id=best.track_id,
+                    oracle_id=getattr(best_ocr, "oracle_id", ""))
+                if not registered.get("duplicate"):
+                    self._remember_card_image(
+                        getattr(best.rectified, "image", None), best_ocr.name,
+                        best_ocr.set_code, str(best_ocr.collector_number))
         self.last_scan = {
             "pipeline": "neural",
             "scene": scene.to_dict(),
             "timings": scene.timings,
             "recognised": best.to_dict(include_image=True),
+            "ocrs": rescue.get("ocr"),
             "totalMs": round((time.time() - t0) * 1000, 1),
         }
-        status = "ok" if (top is not None and not best.match.unknown) else "no_candidates"
-        message = ""
-        if top is None:
-            message = "Card detected but not identified yet — hold still a moment."
-        elif best.match.unknown:
-            message = (f"Card not in the library (closest: {top.name} "
-                       f"{top.confidence:.0%}). Add it to recognise it instantly.")
+        evidence = rescue.get("evidence") or {}
+        if not offerable:
+            status = "no_candidates"
+            closest = all_ranked[0] if all_ranked else None
+            closest_txt = ""
+            if closest is not None:
+                closest_txt = (f" closest in library: "
+                               f"{self._candidate_name(closest)} "
+                               f"{self._candidate_confidence(closest):.0%}.")
+            message = ("Card seen but not identified —" + closest_txt +
+                       " Check the lighting, or add it by name below.")
+        else:
+            status = "ok"
+            message = ""
+        if evidence:
+            name_source = "ocr-name" if evidence.get("nameRaw") else (
+                "ocr-collector" if evidence.get("collectorNumber") else "visual-index")
+        else:
+            name_source = "visual-index"
         return {
             "status": status,
             "state": "card_detected",
             "card_detected": True,
-            "pipeline": "neural",
-            "confidence": top.confidence if top else 0.0,
-            "candidates": candidates,
+            "pipeline": "neural" + ("+ocr" if ocr_candidates else ""),
+            "confidence": max(
+                [top.confidence if top else 0.0]
+                + [self._candidate_confidence(c) for c in ocr_candidates] or [0.0]),
+            "candidates": offerable[:5],
             "evidence": {"visualScore": top.scores.get("embed", 0.0) if top else 0.0,
-                         "nameRaw": top.name if top else "",
-                         "nameConfidence": top.confidence if top else 0.0,
-                         "set": top.set_code if top else "",
-                         "collectorNumber": top.collector_number if top else ""},
+                         "nameRaw": (evidence.get("nameRaw")
+                                     or (top.name if top else "")),
+                         "nameConfidence": (evidence.get("nameConfidence")
+                                            if evidence else
+                                            (top.confidence if top else 0.0)),
+                         "set": (evidence.get("set") or (top.set_code if top else "")),
+                         "collectorNumber": (evidence.get("collectorNumber")
+                                             or (top.collector_number if top else "")),
+                         "source": name_source},
             "message": message,
             "rectifiedCard": (self.last_scan["recognised"] or {}).get("cardImage"),
+            "nameCrop": rescue.get("nameCrop"),
+            "collectorCrop": rescue.get("collectorCrop"),
             "registered": registered,
             "recognition": best.to_dict(include_image=False),
             "otherCards": other_cards,
             "scene": scene.to_dict(include_images=False),
         }
+
+    # ------------------------------------------------------------------
+    # identification helpers (shared by the neural and OCR scan paths)
+    # ------------------------------------------------------------------
+    def _ocr_rescue_scan(self, best) -> dict:
+        """Read the card's own text and ask Scryfall who it is.
+
+        Used when the visual library cannot answer (demo library, untrained
+        embedder, a card nobody indexed). It runs on the *rectified* card
+        image the pipeline already produced, so it costs one OCR pass on an
+        explicit Scan — never per frame.
+        """
+        card_img = getattr(best.rectified, "image", None)
+        if card_img is None or getattr(card_img, "size", 0) == 0:
+            return {}
+        try:
+            ocr = ocr_card_regions(card_img)
+        except Exception as exc:      # never fail a scan because OCR blew up
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        name = (ocr.get("name") or {}).get("normalized", "")
+        number = (ocr.get("collector") or {}).get("number", "")
+        if not name and not number:
+            return {"ocr": ocr}
+        ev = Evidence(
+            name_raw=name,
+            name_conf=float((ocr.get("name") or {}).get("confidence") or 0.0),
+            set_code=(ocr.get("collector") or {}).get("set", ""),
+            collector_number=number,
+            collector_conf=float((ocr.get("collector") or {}).get("confidence") or 0.0),
+            frame_quality=float(getattr(best.rectified, "quality_score", 0.0) or 0.0))
+        try:
+            candidates = self.identifier.identify(ev)
+            self.identifier.rescore(candidates, card_img)
+        except Exception as exc:      # offline / Scryfall down: keep the scan
+            return {"ocr": ocr, "evidence": ev.to_dict(),
+                    "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ocr": ocr,
+            "evidence": ev.to_dict(),
+            "candidates": candidates,
+            "nameCrop": encode_jpeg_b64(extract_name_crop(card_img)),
+            "collectorCrop": encode_jpeg_b64(extract_collector_crop(card_img)),
+        }
+
+    @staticmethod
+    def _candidate_confidence(cand) -> float:
+        if isinstance(cand, dict):
+            return float(cand.get("combinedConfidence")
+                         or cand.get("confidence") or 0.0)
+        return float(getattr(cand, "combined_confidence", 0.0) or 0.0)
+
+    @staticmethod
+    def _candidate_name(cand) -> str:
+        if isinstance(cand, dict):
+            return str(cand.get("name", ""))
+        return str(getattr(cand, "name", ""))
+
+    @classmethod
+    def _merge_candidates(cls, visual: list[dict], ocr: list) -> list:
+        """Visual + OCR candidates, de-duplicated by printing, best first.
+
+        Mixed types on purpose: visual candidates stay dicts (they carry the
+        neural match payload) and OCR candidates stay `Candidate` objects
+        (they carry Scryfall metadata). Both are accepted by
+        `register_candidate`, which is what keeps one ordering for the UI and
+        for the chooser's index.
+        """
+        merged = list(visual) + list(ocr)
+        seen: set[tuple[str, str]] = set()
+        out: list = []
+        for c in sorted(merged, key=lambda x: -cls._candidate_confidence(x)):
+            key = (str(cls._candidate_field(c, "set", "set_code")).lower(),
+                   str(cls._candidate_field(c, "collectorNumber",
+                                            "collector_number")).lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+        return out
+
+    @staticmethod
+    def _candidate_field(cand, dict_key: str, attr: str):
+        if isinstance(cand, dict):
+            return cand.get(dict_key, "")
+        return getattr(cand, attr, "")
+
+    def _register_identified(self, *, name: str, set_code: str, number: str,
+                             card_type: str = "", power=None, toughness=None,
+                             confidence: float = 0.0, track_id: str = "",
+                             oracle_id: str | None = None) -> dict:
+        """Put an identified card on the table (singleton-aware)."""
+        existing = next((o for o in self.state.battlefield("player")
+                         if o.name.lower() == name.lower()), None)
+        if existing is not None:
+            registered = {"trackingId": existing.tracking_id,
+                          "name": existing.name, "duplicate": True}
+        else:
+            self.forge.remember_track(track_id or "", name=name,
+                                      set_code=set_code,
+                                      collector_number=str(number),
+                                      oracle_id=oracle_id)
+            reg = self.engine.apply_player(
+                "card_registered", name=name, set=set_code,
+                collectorNumber=number, cardType=card_type,
+                basePower=power, baseToughness=toughness,
+                zone="battlefield", controller="player",
+                confidence=confidence)
+            registered = {**reg, "name": name}
+        if registered.get("trackingId") and track_id:
+            self.observer.bind(track_id, registered["trackingId"])
+        return registered
+
+    def _remember_card_image(self, card_img, name: str, set_code: str,
+                             number: str) -> dict | None:
+        """Add a newly identified card to the visual index (when it can work).
+
+        With an *untrained* embedder this is refused on purpose: random
+        features would only add confident-looking noise to the index.
+        """
+        if card_img is None or not name or not (set_code and number):
+            return None
+        try:
+            if not self.recognizer.embedder.describe().get("trained"):
+                return {"skipped": "embedder is untrained"}
+            info = self.recognizer.register_card(card_img, set_code, number, name)
+            if time.time() - self._last_index_save > 30.0:
+                self.recognizer.save_index()
+                self._last_index_save = time.time()
+            return info
+        except Exception as exc:      # pragma: no cover - defensive
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
     def register_candidate(self, index: int) -> dict:
         """Player picked one of the offered candidates (OCR or neural path)."""
@@ -871,6 +1107,11 @@ class PhysicalTableServer:
                         out = app.register_manual(
                             str(body.get("set", "")),
                             str(body.get("collectorNumber", "")),
+                            zone=str(body.get("zone", "battlefield")))
+                        self._send_json(200, out)
+                    elif self.path.split("?",1)[0] == "/api/register/name":
+                        out = app.register_by_name(
+                            str(body.get("name", "")),
                             zone=str(body.get("zone", "battlefield")))
                         self._send_json(200, out)
                     elif self.path.split("?",1)[0] == "/api/vision/identify":

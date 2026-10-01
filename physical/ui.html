@@ -109,6 +109,9 @@
       <input id="regSet" placeholder="set (FDN)" size="7">
       <input id="regNum" placeholder="#216" size="6">
       <button onclick="registerManual()">Manual</button>
+      <input id="regName" placeholder="card name" size="13"
+             onkeydown="if(event.key==='Enter') registerByName()">
+      <button onclick="registerByName()">Add by name</button>
       <button onclick="post('event',{type:'token_created',payload:{tokenType:'Soldier',count:1,power:1,toughness:1}})">+Token</button>
       <button onclick="toggleDebug()">🐞</button>
     </div>
@@ -173,12 +176,33 @@ function renderVision(v) {
   const detector = v.detector || "?";
   const idx = v.indexSize || 0;
   const ready = v.ready;
+  const lib = v.library || {};
+  // Be honest about what the library can do: a synthetic demo library (or an
+  // untrained embedder) cannot name a real card, so the scan falls back to
+  // reading the card's text and asking Scryfall.
+  const syntheticOnly = idx > 0 && (lib.real || 0) === 0 && (lib.synthetic || 0) > 0;
+  const noVisual = !ready || syntheticOnly || !emb.trained;
   bar.innerHTML =
     `<b>vision</b>: ${ready ? "🟢 neural" : "🟡 no index"} · ` +
     `index <b>${idx}</b> cards · detector ${esc(detector)} · ` +
     `embedder ${esc(emb.name || "?")}${emb.trained ? " (trained)" : " (untrained)"}` +
     (v.indexError ? ` · <span style="color:#e6b84c">${esc(v.indexError)}</span>` : "") +
     (ready ? "" : ` <button onclick="buildIndex()">Build index</button>`);
+  const notes = [];
+  if (syntheticOnly) {
+    notes.push(`demo library (${lib.synthetic} synthetic cards) — real cards are ` +
+               `matched by OCR + Scryfall; run <code>--sync-scryfall</code> for visual matching`);
+  } else if (ready && !emb.trained) {
+    notes.push("embedder is untrained — visual matching is weak, OCR + Scryfall leads");
+  }
+  if (v.ocrAvailable === false) {
+    notes.push("<span style=\"color:#e6b84c\">OCR unavailable (install tesseract) — " +
+               "use “Add by name”</span>");
+  }
+  if (notes.length) {
+    bar.innerHTML += `<div class="muted" style="margin-top:2px">${notes.join(" · ")}</div>`;
+  }
+  return noVisual;
 }
 
 function renderForge(f) {
@@ -261,12 +285,18 @@ function renderRecognised(r) {
         m.candidates.slice(1, 4).map(x => esc(x.name) + " " +
           Math.round(x.confidence * 100) + "%").join(" · ") + `</div>`;
     }
-    if (top && (unknown || conf < 66)) {
+    if (top && unknown) {
+      // The library says "this is not the card": offering a Confirm button
+      // would write the wrong card into the index. Point at the paths that
+      // can actually name it instead.
+      html += `<div class="muted">not in this library — use 📷 Scan card ` +
+              `(reads the card + Scryfall) or “Add by name”</div>`;
+    } else if (top && conf < 66) {
       html += `<div class="row"><button onclick='confirmRecognition(${JSON.stringify(JSON.stringify(
         {name: top.name, set: top.set, collectorNumber: top.collectorNumber,
-         confidence: top.confidence, addToIndex: unknown,
+         confidence: top.confidence, addToIndex: false,
          cardImage: c.cardImage})).replace(/'/g, "&apos;")})'>` +
-        `Confirm${unknown ? " + remember" : ""}</button></div>`;
+        `Confirm</button></div>`;
     }
     html += `</div>`;
   });
@@ -467,19 +497,37 @@ function renderScan(r) {
     } else if (cand.length) {
       html += `<b>WHICH CARD?</b>`;
     } else {
-      html += `<b>Card seen, not identified</b> — better light or Retry Scan may help`;
+      html += `<b>Card seen, not identified</b>` +
+              (r.message ? ` — ${esc(r.message)}` : ` — better light or Retry Scan may help`);
     }
     html += confLine;
-    html += `<div class="muted">name OCR: “${esc(ev.nameRaw)}” ` +
+    // Never call the visual library's best guess "OCR": say where the name
+    // actually came from, so a 5% library neighbour reads as what it is.
+    const src = ev.source || "";
+    const nameLabel = (src === "ocr-name" || src === "ocr-collector") ? "name (OCR)"
+      : (src === "visual-index" ? "closest in library (visual)" : "name");
+    html += `<div class="muted">${nameLabel}: “${esc(ev.nameRaw)}” ` +
             `${ev.nameConfidence != null ? Math.round((ev.nameConfidence||0)*100) + "%" : ""} · ` +
             `set: ${esc(ev.set) || "—"} · collector: ${esc(ev.collectorNumber) || "—"}</div>`;
     if (!r.registered && cand.length) {
       cand.forEach((c, i) => {
         html += `<div class="cand"><span>${i + 1}. ${esc(c.name)} ` +
                 `<span class="muted">[${esc(c.set)} #${esc(c.collectorNumber)}] ` +
-                `${Math.round((c.combinedConfidence||0)*100)}%</span></span>` +
+                `${Math.round(((c.combinedConfidence ?? c.confidence)||0)*100)}%</span></span>` +
                 `<button onclick="registerCandidate(${i})">Select</button></div>`;
       });
+    }
+    // Unidentified: show what the camera actually saw (a player reads a card
+    // better than the pipeline does) and point at the name field.
+    if (!r.registered && !cand.length) {
+      if (r.nameCrop || r.collectorCrop) {
+        html += `<div class="dbg">` +
+          (r.nameCrop ? `<img src="${esc(r.nameCrop)}">` : "") +
+          (r.collectorCrop ? `<img src="${esc(r.collectorCrop)}">` : "") +
+          `</div>`;
+      }
+      html += `<div class="row" style="margin-top:6px"><span class="muted">` +
+        `type the name above (Scryfall lookup), or use set + #</span></div>`;
     }
     html += `</div>`;
     el.innerHTML = html;
@@ -497,6 +545,28 @@ async function registerManual() {
   const num = document.getElementById("regNum").value;
   if (!set || !num) { return; }
   await post("register", {set, collectorNumber: num});
+  await refresh();
+}
+
+// The player always knows what they played: type the name and Scryfall
+// answers (fuzzy, typo-tolerant), even when the camera and OCR cannot.
+async function registerByName() {
+  const el = document.getElementById("regName");
+  const name = el.value.trim();
+  if (!name) { return; }
+  const box = document.getElementById("scanResult");
+  box.innerHTML = `<div class="box">looking up “${esc(name)}”…</div>`;
+  const r = await post("register/name", {name});
+  if (r.status === "error") {
+    box.innerHTML = `<div class="box bad">${esc(r.error)}</div>`;
+  } else {
+    box.innerHTML = `<div class="box good"><b>REGISTERED</b><br>` +
+      `<b style="font-size:16px">${esc(r.name)}</b> ` +
+      `<span class="muted">[${esc(r.set)} #${esc(r.collectorNumber)}]` +
+      `${r.cardType ? " · " + esc(r.cardType) : ""}</span></div>`;
+    el.value = "";
+  }
+  await refresh();
 }
 
 function toggleDebug() {
@@ -531,8 +601,15 @@ async function loadDebug() {
   const stats = info.cameraStats || {};
   const t = info.timings || {};
   const measured = diag.measuredFps ?? (a && a.camera ? a.camera.measuredFps : null);
+  const wl = t.watcherLoop || {};
+  // Three independent threads: if the preview is choppy while capture is at
+  // the device rate, the problem is the encode, not the camera.
   let txt =
-    `camera owner: camera-watcher (single V4L2 capture loop)\n` +
+    `camera owner: camera-watcher (capture / analysis / preview threads)\n` +
+    `rates: capture ${stats.captureFps ?? "—"} fps · ` +
+    `analysis ${stats.analysisHz ?? "—"} Hz · ` +
+    `preview ${stats.previewHz ?? "—"} Hz (${wl.previewMs ?? "—"} ms/frame)` +
+    `${stats.analysisSkips ? " · analysis skips " + stats.analysisSkips : ""}\n` +
     `camera: ${cam.camera_device || "?"} · ${diag.format || "?"} ` +
     `${diag.width || "?"}x${diag.height || "?"} @${diag.fps || "?"} fps` +
     ` (measured ${measured != null ? Number(measured).toFixed(1) : "—"})\n` +

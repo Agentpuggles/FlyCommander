@@ -70,6 +70,15 @@ class RecognitionConfig:
     max_cards_per_frame: int = 12
     auto_accept_confidence: float = 0.66    # register without asking
     suggest_confidence: float = 0.35        # offer as a suggestion
+    # Never offer a candidate weaker than this. Below ~20% a "match" is what
+    # random feature vectors look like, and offering it as a pick is worse
+    # than saying "I don't know" (a 48-card demo library scores ~5% on a real
+    # card — that is not a suggestion, it is noise with a Select button).
+    min_offer_confidence: float = 0.20
+    # When the visual library cannot answer, read the card's own text and ask
+    # Scryfall by name (works with no image library at all).
+    ocr_rescue: bool = True
+    ocr_auto_accept_confidence: float = 0.60
     stable_votes: int = 2                   # frames before an identity is stable
     vote_window: int = 12
     track_iou: float = 0.25

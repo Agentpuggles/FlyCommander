@@ -54,6 +54,8 @@ class CameraDiagnostics:
     requested_height: int = 0
     requested_fps: float = 0.0
     requested_format: str = ""
+    requested_buffer_size: int = 0
+    buffer_size: int = 0            # what V4L2 actually gave us (0 = unknown)
     attempt_index: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
     measured_fps: float | None = None          # live loop measurement, if any
@@ -74,7 +76,9 @@ class CameraDiagnostics:
                 "height": self.requested_height,
                 "fps": self.requested_fps,
                 "format": self.requested_format,
+                "bufferSize": self.requested_buffer_size,
             },
+            "bufferSize": self.buffer_size,
             "attemptIndex": self.attempt_index,
             "attempts": self.attempts,
             "measuredFps": self.measured_fps,
@@ -106,6 +110,10 @@ class CameraDiagnostics:
             f" FPS: {g_fmt(self.fps)}",
             f" Backend: {self.backend}",
         ]
+        if self.requested_buffer_size:
+            lines.append(
+                f" Buffers: {self.buffer_size or '?'}"
+                f" (requested {self.requested_buffer_size})")
         if self.attempt_index > 0:
             lines.append(f" Note: preferred mode failed; using fallback "
                          f"#{self.attempt_index}")
@@ -173,6 +181,7 @@ class CameraCapture:
         self.diag.requested_height = s.height
         self.diag.requested_fps = s.fps
         self.diag.requested_format = s.format.upper()
+        self.diag.requested_buffer_size = int(getattr(s, "buffer_size", 0) or 0)
 
         attempts: list[dict[str, Any]] = []
         # preferred mode first, then the fallback chain
@@ -216,6 +225,21 @@ class CameraCapture:
                     attempts.append(entry)
                     cap.release()
                     continue
+                # ---- queue depth: the anti-lag knob ----------------------
+                # OpenCV/V4L2 buffers several frames by default. A consumer
+                # that only reads 5 FPS is then handed frames the camera
+                # captured up to half a second ago — the preview looks laggy
+                # even though the device is delivering 30 FPS. Depth 1 makes
+                # every read return the newest frame.
+                if self.diag.requested_buffer_size > 0:
+                    try:
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE,
+                                float(self.diag.requested_buffer_size))
+                        self.diag.buffer_size = int(
+                            cap.get(cv2.CAP_PROP_BUFFERSIZE) or 0)
+                    except Exception:      # pragma: no cover - backend quirk
+                        self.diag.buffer_size = 0
+
                 # prove frames actually flow at the claimed rate
                 got_frame = False
                 for _ in range(3):
