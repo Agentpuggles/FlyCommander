@@ -7,6 +7,7 @@ import forge.game.GameEndReason;
 import forge.game.GameRules;
 import forge.game.GameType;
 import forge.game.Match;
+import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
 import forge.gui.GuiBase;
 import forge.model.FModel;
