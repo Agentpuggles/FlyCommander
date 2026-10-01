@@ -5,6 +5,7 @@
 :root{color-scheme:dark}body{margin:0;background:#12141a;color:#e8ecf4;font:15px/1.5 system-ui}main{max-width:1200px;margin:auto;padding:24px}h1{margin:0}a{color:#7fd4ff}.notice,section{border:1px solid #3d4659;border-radius:10px;padding:18px;margin:16px 0;background:#1b1f2a}.notice{border-color:#c7a65a}#seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}#seats section{margin:0}button{padding:12px;margin:8px 8px 0 0;background:#285a47;color:white;border:1px solid #6aaf89;border-radius:6px;cursor:pointer}button:disabled{opacity:.4}pre{white-space:pre-wrap;font:inherit}small{color:#abb7cb}.card{padding:5px 0;border-bottom:1px solid #343c4a}h3{margin-bottom:4px}#error{color:#ffb1a4}
 </style><main>
 <header><small>FLYCOMMANDER / FOUR-SEAT COMMANDER</small><h1>Your paper table, a digital rules engine</h1><a href="/">Open scanner workspace</a></header>
+<div id="testMode" class="notice" hidden>CONTROLLER TEST — Forge-generated digital hand. NOT physical paper gameplay. Human priority controls currently support explicit pass only.</div>
 <div class="notice"><b>Experimental assisted prototype — not yet runtime-verified</b><p>You approve AI-proposed plays, keep/mulligan and pass priority. Forge AI still selects targets, mana, modes, X, combat, discards and other effect choices. This is not yet the full manual paper game.</p><p>Forge controls the shuffle and draws. Use a matching paper deck and retrieve the hand shown here. Do not draw independently. Scanning records identity only; it never casts a spell or changes this game.</p></div>
 <section><h2 id="status">Checking connection…</h2><p id="error" role="alert"></p><div id="setup"><p>Requires an installed Forge 2.0.15 distribution and a JDK. The launcher compiles the patch before starting; it fails rather than falling back to a fake game.</p><pre>python scripts/run_paper_game.py --forge-dir /path/to/forge \
   --human-deck /path/to/your-deck.dck \
@@ -21,7 +22,8 @@ function node(tag,text){const n=document.createElement(tag);n.textContent=text;r
 async function refresh(){
  try{
  const s=await(await fetch('/api/game')).json();
- el('status').textContent=s.status==='awaiting_decision'?`Your decision · turn ${s.turn} · ${s.phase}`:s.status==='disconnected'?'Scanner only — no game connected':`Game: ${s.status}`;
+ el('testMode').hidden=s.mode!=='controller-test-digital-hand';
+ el('status').textContent=s.status==='awaiting_decision'?(s.prompt?.kind==='priority'?'YOUR PRIORITY':'Your Forge decision'):s.status==='disconnected'?'Scanner only — no game connected':`Game: ${s.status}`;
  el('setup').hidden=Array.isArray(s.seats);
  el('error').textContent=s.error||'';
  el('seats').replaceChildren();

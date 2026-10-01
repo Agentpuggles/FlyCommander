@@ -15,7 +15,7 @@ public final class WebHumanSession {
     }
     public static String snapshotJson() {
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("mode", "physical-development");
+        out.put("mode", Boolean.getBoolean("fly.agent.controllerTest") ? "controller-test-digital-hand" : "physical-development");
         if (fault != null) { out.put("status", "blocked"); out.put("error", fault); }
         else {
             DecisionBroker b = broker;

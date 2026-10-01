@@ -27,6 +27,7 @@ public final class DecisionBroker {
                 List.copyOf(options), min, max);
         answer = null;
         cancellation = null;
+        System.out.println("[HumanBroker] pending id=" + pending.id() + " kind=" + kind);
         long start = System.nanoTime();
         try {
             while (answer == null && cancellation == null) {
@@ -54,6 +55,7 @@ public final class DecisionBroker {
         for (Option o : pending.options()) allowed.add(o.id());
         if (!allowed.containsAll(selected)) return false;
         answer = List.copyOf(selected);
+        System.out.println("[HumanBroker] accepted id=" + id);
         notifyAll();
         return true;
     }
