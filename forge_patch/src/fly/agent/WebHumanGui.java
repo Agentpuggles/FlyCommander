@@ -4,8 +4,9 @@ import forge.gui.interfaces.IGuiGame;
 import java.lang.reflect.*;
 import java.util.*;
 
-/** Partial IGuiGame adapter. Never supplies AI answers for unsupported input.
- * Not installed until synchronized InputProxy events and physical zones exist.
+/** Partial headless IGuiGame adapter used by the digital controller test.
+ * Never supplies AI answers for unsupported input. A GUI view is optional for
+ * the pinned YieldController; it is not the authoritative engine GameView.
  */
 public final class WebHumanGui implements InvocationHandler {
     private final DecisionBroker broker;
@@ -25,6 +26,10 @@ public final class WebHumanGui implements InvocationHandler {
         }
         if (method.isDefault()) return InvocationHandler.invokeDefault(proxy, method, args);
         return switch (method.getName()) {
+            // Forge 2.0.15 YieldController.shouldAutoYield and the human
+            // skipsPromptForStackOrPhase path explicitly guard a null GUI view.
+            // This is a headless view lookup, NOT a human decision or auto-pass.
+            case "getGameView" -> null;
             case "confirm" -> choose("confirm", (String)args[1], List.of("Yes", "No"), 1, 1).get(0).equals("Yes");
             case "one" -> choose("choose_one", (String)args[0], (List<?>)args[1], 1, 1).get(0);
             case "oneOrNone" -> {

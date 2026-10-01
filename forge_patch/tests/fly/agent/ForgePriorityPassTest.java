@@ -13,6 +13,7 @@ import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 import forge.gui.GuiBase;
 import forge.model.FModel;
+import forge.localinstance.properties.ForgePreferences.FPref;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -126,7 +127,8 @@ public final class ForgePriorityPassTest {
                     "Four passes on empty stack did not advance phase");
             check(game.getPhaseHandler().getPriorityPlayer() == human,
                     "Priority not returned to active player in new phase");
-            humanPass(game, controller, gameThread, second);
+            String third = humanPass(game, controller, gameThread, second);
+            checkEndOfTurnTransitions(game, controller, gameThread, flies, third);
             check(!game.isGameOver(), "Game unexpectedly ended");
             System.out.println("PASS: human response -> next player; three Fly passes -> stack resolution; "
                     + "fresh window -> phase advance; human priority legitimately returns");
@@ -135,6 +137,57 @@ public final class ForgePriorityPassTest {
             if (pending != null) controller.decisions().cancel(pending.id(), "test cleanup");
             gameThread.shutdownNow();
         }
+    }
+
+    /** Focused regression for the headless getGameView lookup in cleanup.
+     * Enter via MAIN2 so Forge itself runs onPhaseBegin for END_OF_TURN and
+     * CLEANUP; devModeSet(END_OF_TURN) alone would skip the failing callback.
+     */
+    private static void checkEndOfTurnTransitions(Game game, WebHumanController controller,
+                                                  ExecutorService thread, List<CountingFlyLobby> flies,
+                                                  String previousId) throws Exception {
+        Player human = controller.getPlayer();
+        // Isolate the absent-view path from machine-specific auto-pass preferences.
+        // No automatic yield/marker is enabled, and APINA must not dispatch UI calls.
+        controller.getYieldController().setPref(FPref.YIELD_AUTO_PASS_NO_ACTIONS, "false");
+        check(human.getCardsIn(ZoneType.Hand).isEmpty(), "Fixture must not require cleanup discard");
+        check(game.getStack().isEmpty(), "Fixture stack must be empty");
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN2, human);
+        game.getPhaseHandler().setPriority(human);
+        game.getPhaseHandler().onStackResolved();
+        int turn = game.getPhaseHandler().getTurn();
+        Player next = game.getNextPlayerAfter(human);
+
+        String endStepRequest = humanPass(game, controller, thread, previousId);
+        passFlies(game, thread, flies);
+        check(game.getPhaseHandler().getPhase() == PhaseType.END_OF_TURN,
+                "MAIN2 pass cycle did not enter END_OF_TURN");
+        check(game.getPhaseHandler().getPlayerTurn() == human, "Turn ended before end-step priority");
+
+        humanPass(game, controller, thread, endStepRequest);
+        // Final pass enters CLEANUP: onPhaseBegin calls autoPassCancel on every
+        // player, which calls mayAutoPass -> YieldController.shouldAutoYield ->
+        // WebHumanGui.getGameView. This threw before the null-view fix.
+        passFlies(game, thread, flies);
+        check(game.getPhaseHandler().getPhase() == PhaseType.CLEANUP,
+                "END_OF_TURN pass cycle did not complete cleanup phase-begin");
+        check(controller.getGui().getGameView() == null, "Headless adapter fabricated a GUI view");
+        check(!controller.getYieldController().shouldAutoYield(), "Headless lookup enabled auto-yield");
+        check(controller.decisions().snapshot() == null, "Cleanup auto-created a human response");
+
+        // Ordinary cleanup and untap have no priority. Forge, not a controller
+        // or test return value, must advance them and set the next active player.
+        thread.submit(() -> game.getPhaseHandler().mainLoopStep()).get(10, TimeUnit.SECONDS);
+        check(game.getPhaseHandler().getPhase() == PhaseType.UNTAP,
+                "Cleanup did not advance to next turn's UNTAP");
+        check(game.getPhaseHandler().getPlayerTurn() == next, "Next active player incorrect");
+        check(game.getPhaseHandler().getTurn() == turn + 1, "Turn number did not advance");
+        thread.submit(() -> game.getPhaseHandler().mainLoopStep()).get(10, TimeUnit.SECONDS);
+        check(game.getPhaseHandler().getPhase() == PhaseType.UPKEEP, "UNTAP did not advance to UPKEEP");
+        check(game.getPhaseHandler().getPriorityPlayer() == next, "Next player did not receive upkeep priority");
+        check(controller.decisions().snapshot() == null, "Non-priority steps asked Flynn to respond");
+        System.out.println("PASS: headless getGameView=null; MAIN2 -> END_OF_TURN -> CLEANUP -> "
+                + "next player's UNTAP -> UPKEEP, with Forge phase-begin callbacks");
     }
 
     private static String humanPass(Game game, WebHumanController controller,
