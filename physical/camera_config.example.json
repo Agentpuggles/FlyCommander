@@ -1,0 +1,14 @@
+{
+  "camera_device": "/dev/video0",
+  "camera_width": 1920,
+  "camera_height": 1080,
+  "camera_fps": 30,
+  "camera_format": "MJPG",
+
+  "camera_buffer_size": 1,
+  "preview_width": 960,
+  "preview_fps": 15,
+  "preview_quality": 70,
+  "analysis_fps": 5,
+  "analysis_width": 0
+}

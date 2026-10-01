@@ -11,11 +11,11 @@ no enterprise hardening recommendations.
 | Surface | Component | Risk (realistic) | Current state |
 |---|---|---|---|
 | HTTP server (Forge side) | AgentServer (Java) | malformed JSON crashes episode loop; oversized payload memory | unvalidated schema; no size cap observed |
-| HTTP server (Python side) | [physical/server.py](../../physical/server.py) | same as above + browser client sends input | binds localhost; no auth (acceptable locally) |
+| HTTP server (Python side) | [physical/server.py](../../physical/server.py) | same as above + browser client sends input | **binds 0.0.0.0 by default** (`--host`); no auth — anyone on the LAN can drive the table, POST `/api/vision/index` (large Scryfall download) and watch the camera stream |
 | HTTP client | BrainClient → Python | Python returns malformed action JSON → Java crash loop | no schema validation observed |
 | Scryfall responses | [physical/scryfall_cache.py](../../physical/scryfall_cache.py) | malicious/unexpected JSON shapes cached and consumed | cache trusts response structure |
 | Bulk data files | Scryfall bulk JSONL.gz | multi-GB parse memory spikes; poisoned mirror (if URL overridden) | official URL hardcoded — verify at download time |
-| Camera | browser getUserMedia | permission prompt phishing is N/A locally; frames stay local | OK for threat model |
+| Camera | server-owned V4L2 capture (`physical/camera_watcher.py`) | MJPEG stream is unauthenticated on 0.0.0.0 | pass `--host 127.0.0.1` if the table is not on a trusted LAN |
 | Browser UI | physical server pages | XSS via card names from Scryfall (arbitrary text rendered) | card names are attacker-influenced-adjacent (card *names* are user/Oracle content; sanitize before HTML insertion) |
 | Filesystem | caches, checkpoints, logs | path traversal if any user-controlled string becomes a path | identifiers derive from card IDs; review before letting remote input pick file paths |
 | Process lifecycle | JVM + Python pair | orphaned processes on crash (start_new_session used correctly) | OK |
@@ -29,12 +29,12 @@ no enterprise hardening recommendations.
    kills an episode or a server. Local-only threat model makes this a
    *robustness* bug more than a security bug — but the fix is the same
    (validate at boundary, fail loud, log, continue). Claims SEC-001.
-2. **Unbounded request size.** No observed Content-Length cap; a runaway
-   vision client could OOM the small server. Cheap fix when hardening.
-3. **Card-name-derived HTML insertion** in any browser page: escape card
-   names (they can contain `<>` legitimately? — card names don't, but
-   flavor/printed text fields can contain quotes/apostrophes; escape
-   anyway).
+2. **Unbounded request size.** ~~No observed Content-Length cap~~ — fixed:
+   `MAX_REQUEST_BYTES` (32 MB) is enforced on POST bodies since the camera
+   endpoints accept base64 frames.
+3. **Card-name-derived HTML insertion** — fixed: every card name and
+   event payload in `physical/ui.html` goes through `esc()`
+   (guarded by `tests/test_ui_hardening.py`).
 4. **Cache poisoning is theoretical** (local attacker already owns the
    machine); document, don't engineer.
 5. **Secrets:** none found (no tokens/keys in repo). Scryfall needs no auth.

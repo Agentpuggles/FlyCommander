@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 SCRYFALL_API = "https://api.scryfall.com/cards/{set}/{number}"
@@ -116,6 +116,13 @@ class ScryfallCache:
         return None
 
     def put(self, info: CardInfo) -> None:
+        # Canonicalise the primary key here, not just in get(): Scryfall's
+        # JSON uses a lowercase set code, so a CardInfo built from raw API
+        # data (or by hand) used to be stored as "soi" and then looked up as
+        # "SOI" — an invisible miss that silently emptied the offline cache.
+        info = replace(info,
+                       set_code=str(info.set_code).strip().upper(),
+                       collector_number=str(info.collector_number).strip())
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO cards VALUES (?,?,?,?,?,?,?,?,?)",

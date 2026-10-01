@@ -27,7 +27,13 @@ from vision.artmatch import ArtMatcher
 
 NAMED_API = "https://api.scryfall.com/cards/named?fuzzy={name}"
 SEARCH_API = "https://api.scryfall.com/cards/search?q={q}&unique=prints"
+# Autocomplete is built for free-typed names: it never errors, ignores spaces
+# and punctuation, and returns up to 20 candidate names. /cards/named?fuzzy=
+# returns an error when the input is ambiguous — which is exactly what noisy
+# OCR produces — so autocomplete is the better first resort for OCR text.
+AUTOCOMPLETE_API = "https://api.scryfall.com/cards/autocomplete?q={q}"
 MAX_PRINT_CANDIDATES = 5
+MAX_AUTOCOMPLETE_TRIES = 2
 
 
 def name_similarity(a: str, b: str) -> float:
@@ -152,6 +158,51 @@ class CardIdentifier:
         self.cache.put(info)
         return info
 
+    def autocomplete_names(self, name: str, limit: int = 10) -> list[str]:
+        """Up to `limit` real card names that could complete this string.
+
+        Scryfall's autocomplete endpoint (documented for assistive
+        name entry): spaces, punctuation and case are ignored, and a miss
+        returns an empty catalog instead of an error — so garbage OCR in,
+        plausible card names out.
+        """
+        if not self.allow_network or len(name.strip()) < 2:
+            return []
+        data = self._get_json(
+            AUTOCOMPLETE_API.format(q=urllib.parse.quote(name.strip())))
+        if data is None:
+            return []
+        out: list[str] = []
+        for n in (data.get("data") or [])[:limit]:
+            if isinstance(n, str) and n:
+                out.append(n)
+        return out
+
+    def resolve_name(self, name: str) -> CardInfo | None:
+        """Name (typed or OCR'd) → CardInfo, weakest signal last.
+
+        Order: local cache → Scryfall fuzzy → autocomplete-assisted. The last
+        step matters for OCR: "Gitroq Monsler" fails the fuzzy lookup, but
+        autocomplete returns the neighbourhood of real names and one of them
+        is the card.
+        """
+        name = (name or "").strip()
+        if len(name) < 2:
+            return None
+        local = self.local_name_match(name)
+        if local and name_similarity(name, local[0].name) >= 0.82:
+            return local[0]
+        info = self.fuzzy_by_name(name)
+        if info is not None:
+            return info
+        for candidate in self.autocomplete_names(name)[:MAX_AUTOCOMPLETE_TRIES]:
+            if name_similarity(name, candidate) < 0.45:
+                continue
+            info = self.fuzzy_by_name(candidate)     # a real name: exact-ish
+            if info is not None:
+                return info
+        return None
+
     def prints_by_name(self, name: str) -> list[CardInfo]:
         """All printings of an exact name (for the WHICH CARD? chooser)."""
         q = urllib.parse.quote(f'!"{name}"')
@@ -196,9 +247,9 @@ class CardIdentifier:
             primary: CardInfo | None = None
             local = self.local_name_match(name)
             if local and name_similarity(name, local[0].name) >= 0.82:
-                primary = local[0]
+                primary = local[0]          # offline answer wins: no request
             else:
-                primary = self.fuzzy_by_name(name)
+                primary = self.resolve_name(name)
             if primary is not None:
                 match = name_similarity(name, primary.name)
                 if not any(c.name == primary.name

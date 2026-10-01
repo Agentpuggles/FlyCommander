@@ -2,7 +2,8 @@
 """FlyCommander — physical-table mode launcher.
 
 Starts the local server (state + events + registration + fly brain) and
-serves the spectator UI with browser camera capture.
+serves the spectator UI. The server owns the camera and streams MJPEG to the
+browser; the browser never opens /dev/video itself.
 
     python scripts/physical_table.py [--port 8795] [--checkpoint ...]
 """
@@ -14,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from physical.card_scan import SCAN_AVAILABLE, tesseract_ready     # noqa: E402
 from physical.server import PhysicalTableApp, PhysicalTableServer  # noqa: E402
 
 
@@ -73,14 +75,38 @@ def main() -> int:
     if status["ready"]:
         print(f"[vision] neural recognition active — {status['indexSize']} cards "
               f"indexed, detector={status['detector']}, "
-              f"embedder={status['embedder']['name']}")
+              f"embedder={status['embedder']['name']}"
+              f"{' (trained)' if status['embedder'].get('trained') else ' (UNTRAINED)'}")
     else:
         print("[vision] no recognition index yet — run with --build-index 64 "
               "(demo library) or --sync-scryfall (real cards); the OCR path "
               "stays available in the meantime")
+
+    # Which of the three identification paths can actually answer right now?
+    # Say it out loud at startup: "it didn't recognise my card" is otherwise
+    # undebuggable from the UI alone.
+    library = app.card_db.library_summary()
+    ocr_ok, ocr_why = tesseract_ready()
+    ocr_state = f"available (tesseract {ocr_why})" if ocr_ok else \
+        f"UNAVAILABLE — {ocr_why}"
+    print(f"[vision] library: {library['cards']} cards "
+          f"({library['real']} real / {library['synthetic']} synthetic demo), "
+          f"{library['images']} images")
+    print(f"[vision] OCR + Scryfall rescue: {ocr_state}")
+    if library["real"] == 0 and library["synthetic"] > 0:
+        print("[vision]   → the demo library cannot name real cards from pixels; "
+              "Scan reads the card's text instead")
+    if not status["embedder"].get("trained"):
+        print("[vision]   → embedder is untrained, so visual matching is weak: "
+              "scripts/train_embedder.py is what buys accuracy")
+    if not (SCAN_AVAILABLE and ocr_ok):
+        print("[vision]   → with no OCR, \"Add by name\" is the way to put a "
+              "card on the table")
     print(f"[physical] Magic Fly table running:  http://127.0.0.1:{args.port}")
-    print("[physical] allow the browser camera when prompted (mtgscan-style")
-    print("[physical] getUserMedia). Cards are recognised automatically;")
+    print("[physical] camera: server-owned MJPEG stream — no browser camera "
+          "permission needed")
+    print("[physical] press 📷 Scan card to identify a card, or type its name "
+          "under the video")
     print("[physical] the fly brain panel updates with every decision.")
     try:
         while True:

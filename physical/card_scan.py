@@ -38,11 +38,41 @@ except ImportError:  # pragma: no cover
 
 SCAN_AVAILABLE = CV_AVAILABLE and TESS_AVAILABLE
 
-# NOTE: tesseract char whitelists cannot contain spaces through pytesseract
-# (the config string is whitespace-split), so name OCR runs *without* a
-# whitelist and relies on post-normalization; the collector whitelist is
-# space-free and safe.
+
+def tesseract_ready() -> tuple[bool, str]:
+    """(is_usable, version_or_reason) for the OCR rescue path.
+
+    `TESS_AVAILABLE` only means the Python wrapper imports — the tesseract
+    *binary* is a separate install. Scanning cannot tell which is missing,
+    so the table reports the real reason at startup instead of silently
+    falling back to "not identified".
+    """
+    if not TESS_AVAILABLE:
+        return False, "pytesseract not installed"
+    try:
+        return True, str(pytesseract.get_tesseract_version())
+    except Exception as exc:                      # binary missing / not on PATH
+        return False, f"tesseract binary unusable ({type(exc).__name__})"
+
+# Tesseract char whitelists CAN contain spaces through pytesseract: it builds
+# the command line with `shlex.split(config)`, so a *quoted* whitelist keeps
+# its space (verified against pytesseract 0.3.x source). Name OCR therefore
+# runs constrained — which is what research/computer_vision/ocr_and_detection.md
+# recommends, because an unconstrained read of the stylized Beleren name line
+# happily invents digits and punctuation out of background texture.
+_NAME_WHITELIST = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    "0123456789 '-,.!&/:*"
+)
 _COLLECTOR_WHITELIST = "0123456789/().ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _ocr_config(psm: int, whitelist: str | None) -> str:
+    """Tesseract config string; the whitelist is quoted so spaces survive."""
+    cfg = f"--psm {psm}"
+    if whitelist:
+        cfg += f' -c tessedit_char_whitelist="{whitelist}"'
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +228,7 @@ def _prep_variants(crop: "np.ndarray") -> list["np.ndarray"]:
 
 def _run_ocr(img: "np.ndarray", psm: int,
              whitelist: str | None = None) -> tuple[str, float]:
-    cfg = f"--psm {psm}"
-    if whitelist:
-        cfg += f" -c tessedit_char_whitelist={whitelist}"
+    cfg = _ocr_config(psm, whitelist)
     try:
         data = pytesseract.image_to_data(img, config=cfg,
                                          output_type=pytesseract.Output.DICT)
@@ -236,7 +264,16 @@ def ocr_card_regions(card: "np.ndarray") -> dict[str, Any]:
     name_raw, name_conf = "", 0.0
     for variant in _prep_variants(extract_name_crop(card)):
         for psm in (7, 6):
-            text, conf = _run_ocr(variant, psm)   # no whitelist (spaces!)
+            text, conf = _run_ocr(variant, psm, _NAME_WHITELIST)
+            norm = normalize_name(text)
+            if len(norm) > len(normalize_name(name_raw)) and len(norm) >= 3:
+                name_raw, name_conf = text, conf
+    if len(normalize_name(name_raw)) < 3:
+        # A whitelist costs a legitimate character on the odd glyph (accented
+        # names, unusual promo frames). If it left us with nothing readable,
+        # retry unconstrained rather than drop the name signal entirely.
+        for variant in _prep_variants(extract_name_crop(card)):
+            text, conf = _run_ocr(variant, 7)
             norm = normalize_name(text)
             if len(norm) > len(normalize_name(name_raw)) and len(norm) >= 3:
                 name_raw, name_conf = text, conf

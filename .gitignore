@@ -25,6 +25,10 @@ data/
 *.sqlite
 *.db
 
+# The documented example camera config is part of the repo (copy it to
+# physical/camera_config.json and edit: that copy stays ignored above).
+!physical/camera_config.example.json
+
 # OS
 .DS_Store
 .idea/
