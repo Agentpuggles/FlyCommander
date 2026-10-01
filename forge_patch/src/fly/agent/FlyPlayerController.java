@@ -55,6 +55,7 @@ public class FlyPlayerController extends PlayerControllerAi {
      */
     @Override
     public java.util.List<SpellAbility> chooseSpellAbilityToPlay() {
+        publishHumanTable();
         // Forge 2.0.15 uses null for pass, NOT an empty ability list. Returning
         // [] would keep this AI in PhaseHandler's action loop until its limit.
         // Gate: the brain only decides on the fly's own main phases. Everything
@@ -125,6 +126,27 @@ public class FlyPlayerController extends PlayerControllerAi {
         } else {
             AgentServer.recordAction("attack:skipped");
             // leave combat empty
+        }
+        publishHumanTable();
+    }
+
+    @Override
+    public void declareBlockers(Player defender, forge.game.combat.Combat combat) {
+        super.declareBlockers(defender, combat);
+        publishHumanTable();
+    }
+
+    @Override
+    public boolean playChosenSpellAbility(SpellAbility sa) {
+        boolean result = super.playChosenSpellAbility(sa);
+        publishHumanTable();
+        return result;
+    }
+
+    private void publishHumanTable() {
+        Player table = AgentGameState.tableSeat();
+        if (table != null && table.getGame() == getGame()) {
+            HumanDecisionChannel.publish(TableSnapshot.capture(getGame(), table));
         }
     }
 

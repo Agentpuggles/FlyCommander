@@ -43,7 +43,6 @@ No scanner, browser UI, physical-hand logic or launcher changes.
 ## Local verification (Arch/CachyOS)
 
 ```bash
-git pull --ff-only origin arena/01a0f6d4-flycommander
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 export PATH="$JAVA_HOME/bin:$PATH"
 python3 scripts/build_forge_source.py

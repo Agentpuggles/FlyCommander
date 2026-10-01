@@ -26,6 +26,12 @@ def verify(source):
         actual = git(source, 'rev-parse', ref)
         if actual != expected:
             raise ValueError(f'{ref}: expected {expected}, got {actual}')
+    sparse = subprocess.run(
+        ['git', '-C', str(source), 'config', '--bool', '--get', 'core.sparseCheckout'],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if sparse.returncode == 0 and sparse.stdout.strip().lower() == 'true':
+        raise ValueError('Forge source checkout is sparse; run '
+                         f'`git -C "{source}" sparse-checkout disable` before building')
     if git(source, 'status', '--porcelain', '--untracked-files=no'):
         raise ValueError('Upstream tracked source is modified; refusing an unpinned build')
     if not (source / 'forge-gui/res').is_dir():

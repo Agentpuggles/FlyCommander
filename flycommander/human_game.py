@@ -35,7 +35,13 @@ class HumanGameClient:
                     or not all(isinstance(v, str) and 0 < len(v) <= 256 for v in selected)
                     or len(set(selected)) != len(selected)):
                 return {'status': 'rejected', 'error': 'Invalid decision selection.'}
-            return self.request('/human/decision', {'id': body['id'], 'selected': selected})
+            action = body.get('action')
+            if action is not None and (not isinstance(action, str) or not 0 < len(action) <= 256):
+                return {'status': 'rejected', 'error': 'Invalid decision action.'}
+            response = {'id': body['id'], 'selected': selected}
+            if action is not None:
+                response['action'] = action
+            return self.request('/human/decision', response)
         if not isinstance(body, dict) or not all(isinstance(body.get(k), str) and 0 < len(body[k]) <= 256 for k in ('id', 'choice')):
             return {'status': 'rejected', 'error': 'A prompt ID and choice are required.'}
         return self.request('/human/decision', {'id': body['id'], 'choice': body['choice']})

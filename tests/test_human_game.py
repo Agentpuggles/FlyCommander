@@ -57,19 +57,38 @@ def test_game_page_and_disconnected_route(tmp_path):
     try:
         base = f'http://127.0.0.1:{server._http.server_port}'
         with urllib.request.urlopen(base+'/play') as r:
-            assert b'not yet runtime-verified' in r.read()
+            page = r.read()
+            assert b'Digital Forge Commander' in page
+            assert b'physical sync not installed' in page
+            assert b'Start 4-player Commander' in page
+            assert b'Enable webcam' in page
+            assert b"input.id='typedDecisionInput'" in page
+            assert b'input.focus()' in page
+            assert b'restoreInputFocus' in page
+            assert b'/api/pod/start' in page
         with urllib.request.urlopen(base+'/api/game') as r:
             assert json.load(r)['status'] == 'disconnected'
+        with urllib.request.urlopen(base+'/api/pod/status') as r:
+            assert json.load(r)['status'] == 'idle'
     finally:
         server.stop()
 
 
-def test_new_broker_transport_does_not_interpret_actions(monkeypatch):
+def test_broker_transport_preserves_actions_and_empty_cancel(monkeypatch):
     client = HumanGameClient()
     calls = []
     monkeypatch.setattr(client, 'request', lambda path, body=None: calls.append((path, body)) or {'status':'accepted'})
-    assert client.decide({'id':'prompt', 'selected':['b','a']})['status'] == 'accepted'
-    assert calls == [('/human/decision', {'id':'prompt', 'selected':['b','a']})]
-    for selected in [['a','a'], [1], 'a']:
-        assert client.decide({'id':'prompt', 'selected':selected})['status'] == 'rejected'
-    assert len(calls) == 1
+    assert client.decide({'id':'prompt', 'selected':['b','a'], 'action':'confirm'})['status'] == 'accepted'
+    assert client.decide({'id':'optional', 'selected':[], 'action':'cancel'})['status'] == 'accepted'
+    assert calls == [
+        ('/human/decision', {'id':'prompt', 'selected':['b','a'], 'action':'confirm'}),
+        ('/human/decision', {'id':'optional', 'selected':[], 'action':'cancel'}),
+    ]
+    for body in (
+        {'id':'prompt', 'selected':['a','a']},
+        {'id':'prompt', 'selected':[1]},
+        {'id':'prompt', 'selected':'a'},
+        {'id':'prompt', 'selected':['a'], 'action':[]},
+    ):
+        assert client.decide(body)['status'] == 'rejected'
+    assert len(calls) == 2

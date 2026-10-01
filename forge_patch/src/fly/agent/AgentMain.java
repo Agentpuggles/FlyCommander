@@ -19,10 +19,12 @@ import java.util.List;
  * FlyCommander entry point. Boots Forge headless (no GUI), starts the HTTP
  * agent server, resolves deck specs through Forge's own Commander deck pool
  * (see {@link DeckResolver}), then runs N full Commander games: seat 1 is the
- * fly brain (via FlyLobbyPlayer), remaining seats are stock Forge AI.
+ * fly brain (via FlyLobbyPlayer), remaining seats are stock Forge AI. In
+ * physical pod mode seat 0 is a real browser-controlled Forge human and seats
+ * 1–3 are stock Forge AI by default; Fly opponents are optional.
  *
  * Usage:
- *   java -cp patch:forge.jar fly.agent.AgentMain <games> <flySpec> <aiSpec>...
+ *   java -cp patch:forge.jar fly.agent.AgentMain <games> <humanOrFlySpec> <aiSpec>...
  *
  * where each deck spec is "random" (Forge's Commander Decks pool), a deck
  * name from that pool, or an explicit path to a .dck file.
@@ -37,11 +39,15 @@ public final class AgentMain {
         }
         boolean controllerTest = Boolean.getBoolean("fly.agent.controllerTest");
         boolean physical = Boolean.getBoolean("fly.agent.physical");
+        boolean assistedHuman = Boolean.getBoolean("fly.agent.assistedHuman");
         boolean table = "1".equals(System.getProperty("fly.agent.table"));
+        boolean flyOpponents = physical && "fly".equalsIgnoreCase(System.getProperty("fly.agent.opponents", "forge"));
+        if (assistedHuman && !physical) throw new IllegalArgumentException("assistedHuman requires physical pod mode");
+        if (assistedHuman && controllerTest) throw new IllegalArgumentException("Choose assistedHuman or controllerTest, not both");
         if (table && !Boolean.getBoolean("fly.agent.experimentalAssisted"))
             throw new IllegalArgumentException("Table mode requires -Dfly.agent.experimentalAssisted=true; not a full human controller");
         if (table && args.length != 5) throw new IllegalArgumentException("Table mode requires exactly three opponents");
-        if (physical && args.length != 5) throw new IllegalArgumentException("Physical pod needs three Fly decks");
+        if (physical && args.length != 5) throw new IllegalArgumentException("Human Commander pod needs exactly three opponent decks");
         if (controllerTest && !physical) throw new IllegalArgumentException("controllerTest requires physical seat mode");
         if (physical && table) throw new IllegalArgumentException("Choose physical or legacy table mode, not both");
         int games = Integer.parseInt(args[0]);
@@ -78,15 +84,15 @@ public final class AgentMain {
 
         // --- decks: resolved through Forge's own pool/APIs -------------------
         System.out.println("[FlyAgent] commander pool size: " + DeckResolver.poolSize());
-        Deck flyDeck = DeckResolver.resolve(flySpec);
-        System.out.println("[FlyAgent] fly deck: " + flyDeck.getName());
+        Deck primaryDeck = DeckResolver.resolve(flySpec);
+        System.out.println("[FlyAgent] " + (physical ? "human" : "fly") + " deck: " + primaryDeck.getName());
 
         List<Deck> aiDecks = new ArrayList<>();
         int aiIndex = 2;
         for (String spec : aiSpecs) {
             Deck d = DeckResolver.resolve(spec);
             aiDecks.add(d);
-            System.out.println("[FlyAgent] ai deck " + aiIndex + ": " + d.getName());
+            System.out.println("[FlyAgent] opponent deck " + (aiIndex - 1) + ": " + d.getName());
             aiIndex++;
         }
 
@@ -95,25 +101,33 @@ public final class AgentMain {
         rules.setAppliedVariants(java.util.EnumSet.of(GameType.Commander));
         rules.setGamesPerMatch(1);
 
-        forge.LobbyPlayer flyLobby = physical ? new WebHumanLobbyPlayer("Flynn") : table ? new TableLobbyPlayer("Paper human (AI-assisted)") : new FlyLobbyPlayer("FlyBrain");
-        RegisteredPlayer flySeat = RegisteredPlayer.forCommander(flyDeck);
-        flySeat.setPlayer(flyLobby);
+        forge.LobbyPlayer primaryLobby = physical
+                ? (assistedHuman ? new TableLobbyPlayer("Paper human (legacy AI-assisted)") : new WebHumanLobbyPlayer("Flynn"))
+                : table ? new TableLobbyPlayer("Paper human (legacy AI-assisted)") : new FlyLobbyPlayer("FlyBrain");
+        RegisteredPlayer primarySeat = RegisteredPlayer.forCommander(primaryDeck);
+        primarySeat.setPlayer(primaryLobby);
 
         List<RegisteredPlayer> seats = new ArrayList<>();
-        seats.add(flySeat);
+        seats.add(primarySeat);
         aiIndex = 2;
         for (Deck aiDeck : aiDecks) {
             RegisteredPlayer seat = RegisteredPlayer.forCommander(aiDeck);
-            int flyNumber = aiIndex - 1;
-            seat.setPlayer(physical ? new FlyLobbyPlayer("Fly #" + flyNumber,
-                    "http://127.0.0.1:" + (Integer.getInteger("fly.agent.brainBasePort", 8792) + flyNumber - 1) + "/decide")
-                    : GamePlayerUtil.createAiPlayer("Ai(" + aiIndex + ")-" + aiDeck.getName(), aiIndex, ""));
+            int opponentNumber = aiIndex - 1;
+            if (physical && flyOpponents) {
+                int port = Integer.getInteger("fly.agent.brainBasePort", 8792) + opponentNumber - 1;
+                seat.setPlayer(new FlyLobbyPlayer("Fly #" + opponentNumber,
+                        "http://127.0.0.1:" + port + "/decide"));
+            } else if (physical) {
+                seat.setPlayer(GamePlayerUtil.createAiPlayer("Forge AI #" + opponentNumber, aiIndex, ""));
+            } else {
+                seat.setPlayer(GamePlayerUtil.createAiPlayer("Ai(" + aiIndex + ")-" + aiDeck.getName(), aiIndex, ""));
+            }
             seats.add(seat);
             aiIndex++;
         }
 
         Match match = new Match(rules, seats, "FlyCommander");
-        AgentServer.setDecks(flyDeck.getName(),
+        AgentServer.setDecks(primaryDeck.getName(),
                 aiDecks.stream().map(Deck::getName).toList());
         AgentServer.markReady();
 
@@ -122,18 +136,29 @@ public final class AgentMain {
             System.out.println("[FlyAgent] === game " + g + "/" + games + " ===");
             AgentServer.beginGame(g);
             Game game = match.createGame();
-            // register the in-game fly Player once created (seat 0)
+            // Register any optional Fly seat for the existing observer path.
             registerFlyPlayer(game);
-            if (table) {
+            Player humanSeat = null;
+            if (physical && !assistedHuman && !table) {
+                for (var p : game.getPlayers()) {
+                    if (p.getLobbyPlayer() instanceof WebHumanLobbyPlayer) {
+                        humanSeat = p;
+                        WebHumanSession.updateGame(game, humanSeat);
+                        break;
+                    }
+                }
+            }
+            if (table || assistedHuman) {
                 for (var p : game.getPlayers()) if (p.getLobbyPlayer() instanceof TableLobbyPlayer) {
-                    AgentGameState.register(game, p);
                     AgentGameState.registerTable(p);
                 }
+                Player tableSeat = AgentGameState.tableSeat();
+                if (tableSeat != null) HumanDecisionChannel.publish(TableSnapshot.capture(game, tableSeat));
             }
             for (var p : game.getPlayers())
                 System.out.println("[RuntimeTest] Seat " + p.getId() + ": " + p.getName() + " / " + p.getController().getClass().getName());
-            if (physical && controllerTest) {
-                System.out.println("[RuntimeTest] CONTROLLER TEST ONLY: Forge-generated hands, NOT paper gameplay");
+            if (physical && controllerTest && flyOpponents) {
+                System.out.println("[RuntimeTest] CONTROLLER TEST ONLY: Forge-generated hands, NOT physical library gameplay");
                 for (int n = 1; n <= 3; n++) {
                     String url = "http://127.0.0.1:" + (Integer.getInteger("fly.agent.brainBasePort", 8792) + n - 1) + "/stats";
                     var response = java.net.http.HttpClient.newHttpClient().send(
@@ -143,30 +168,36 @@ public final class AgentMain {
                     System.out.println("[RuntimeTest] Fly #" + n + " connected: " + url + " " + response.body());
                 }
             }
-            if (physical && !controllerTest) {
-                // Never let Forge deal an invented paper hand. Until the source
-                // draw/library hook is installed this mode is a wiring diagnostic.
-                WebHumanSession.fault("Physical library/draw source hook is not installed. Four seats created; game has NOT started. No paper hand was invented.");
-                new java.util.concurrent.CountDownLatch(1).await();
-            }
             System.out.println("[RuntimeTest] Calling Match.startGame");
             try {
                 match.startGame(game);
             } catch (Throwable failure) {
                 failure.printStackTrace();
-                WebHumanSession.fault("Forge runtime stopped: " + failure);
+                String fault = "Forge runtime stopped: " + failure;
+                if (assistedHuman) HumanDecisionChannel.fault(fault);
+                else WebHumanSession.fault(fault);
                 // Retain HTTP error evidence for inspection, without continuing the game.
                 new java.util.concurrent.CountDownLatch(1).await();
                 return;
             }
 
-            if (table) HumanDecisionChannel.finish(TableSnapshot.capture(game, AgentGameState.tableSeat()));
+            if (table || assistedHuman) HumanDecisionChannel.finish(TableSnapshot.capture(game, AgentGameState.tableSeat()));
             GameEndReason reason = game.getOutcome().getWinCondition();
-            boolean flyWon = game.getOutcome().isWinner(flyLobby);
+            boolean primaryWon = game.getOutcome().isWinner(primaryLobby);
+            boolean humanPod = physical && !assistedHuman && !table;
+            boolean humanWon = physical && primaryWon;
+            boolean flyWon = !physical && !table && primaryWon;
+            if (humanPod) WebHumanSession.finish(game, humanSeat, humanWon, reason.name());
             if (flyWon) flyWins++;
-            String resultJson = resultJson(g, flyWon, reason, game);
+            String resultJson = (assistedHuman || humanPod)
+                    ? assistedResultJson(g, humanWon || (assistedHuman && primaryWon), reason, game)
+                    : resultJson(g, flyWon, reason, game);
             AgentServer.recordResult(resultJson);
-            System.out.println("[FlyAgent] game " + g + " result: " + resultJson);
+            System.out.println(humanPod
+                    ? "[FlyAgent] digital human result: " + resultJson
+                    : assistedHuman
+                            ? "[FlyAgent] legacy paper-assist human result: " + resultJson
+                            : "[FlyAgent] game " + g + " result: " + resultJson);
 
             try {
                 Thread.sleep(1000); // give the Python side a beat to poll
@@ -175,7 +206,9 @@ public final class AgentMain {
             }
         }
 
-        System.out.println("[FlyAgent] FLY WIN RATE: " + flyWins + "/" + games);
+        if (physical && !assistedHuman && !table) System.out.println("[FlyAgent] digital human Commander match finished.");
+        else if (assistedHuman) System.out.println("[FlyAgent] legacy paper-assist match finished.");
+        else System.out.println("[FlyAgent] FLY WIN RATE: " + flyWins + "/" + games);
         Thread.sleep(15000); // let the Python side fetch /result before exit
         System.exit(0);
     }
@@ -195,6 +228,15 @@ public final class AgentMain {
                                      GameEndReason reason, Game g) {
         return "{\"game\":" + game
                 + ",\"flyWon\":" + flyWon
+                + ",\"reason\":\"" + reason + '"'
+                + ",\"turns\":" + g.getOutcome().getLastTurnNumber()
+                + '}';
+    }
+
+    private static String assistedResultJson(int game, boolean humanWon,
+                                             GameEndReason reason, Game g) {
+        return "{\"game\":" + game
+                + ",\"humanWon\":" + humanWon
                 + ",\"reason\":\"" + reason + '"'
                 + ",\"turns\":" + g.getOutcome().getLastTurnNumber()
                 + '}';

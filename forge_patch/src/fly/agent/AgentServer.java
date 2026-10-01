@@ -67,6 +67,9 @@ public final class AgentServer {
         aiDeckNames = java.util.List.copyOf(aiNames);
     }
 
+    public static String resolvedHumanDeckName() { return flyDeckName; }
+    public static java.util.List<String> resolvedAiDeckNames() { return aiDeckNames; }
+
     public static void beginGame(int n) {
         currentGame = n;
         decisionsThisGame = 0;
@@ -147,8 +150,23 @@ public final class AgentServer {
         }
         try {
             var body = MiniJson.parseObject(readBody(ex));
-            boolean ok = WebHumanSession.active() ? WebHumanSession.submit(body)
-                    : HumanDecisionChannel.submit(String.valueOf(body.get("id")), String.valueOf(body.get("choice")));
+            boolean ok;
+            if (WebHumanSession.active()) {
+                ok = WebHumanSession.submit(body);
+            } else if (body.get("selected") instanceof java.util.List<?> raw) {
+                java.util.List<String> selected = new java.util.ArrayList<>();
+                for (Object value : raw) {
+                    if (!(value instanceof String)) { selected.clear(); break; }
+                    selected.add((String) value);
+                }
+                ok = !selected.isEmpty() || raw.isEmpty()
+                        ? HumanDecisionChannel.submit(String.valueOf(body.get("id")), selected)
+                        : false;
+            } else {
+                ok = body.get("id") instanceof String id
+                        && body.get("choice") instanceof String choice
+                        && HumanDecisionChannel.submit(id, choice);
+            }
             respond(ex, ok ? 200 : 409, ok ? "{\"status\":\"accepted\"}" : "{\"error\":\"Stale, duplicate or invalid decision; refresh state\"}");
         } catch (RuntimeException e) { respond(ex, 400, "{\"error\":\"Invalid decision\"}"); }
     }

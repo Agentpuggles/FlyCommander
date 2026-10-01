@@ -67,6 +67,7 @@ from physical.state import PhysicalGameState
 from physical.vision_pipeline import CardRecognizer, RecognitionConfig
 from flycommander.forge_table_bridge import ForgeTableBridge
 from flycommander.human_game import HumanGameClient
+from physical.pod_session import PodSessionManager
 
 UI_PATH = Path(__file__).resolve().parent / "ui.html"
 
@@ -84,6 +85,10 @@ class PhysicalTableApp:
                  allow_network: bool = True,
                  camera_config: str | Path | None = None) -> None:
         self.human_game = HumanGameClient()
+        self.pod_session = PodSessionManager(
+            data_dir=data_dir,
+            runtime_dir=os.environ.get("FLYCOMMANDER_FORGE_RUNTIME_DIR"),
+        )
         self.state = PhysicalGameState()
         self.log = EventLog(log_path or Path(data_dir) / "events.jsonl")
         self.engine = Engine(self.state, self.log)
@@ -1102,6 +1107,8 @@ class PhysicalTableServer:
                     self.wfile.write(content)
                 elif path == "/api/game":
                     self._send_json(200, app.human_game.state())
+                elif path == "/api/pod/status":
+                    self._send_json(200, app.pod_session.status())
                 elif path == "/api/state":
                     self._send_json(200, app.ui_snapshot())
                 elif path == "/api/pending":
@@ -1154,7 +1161,15 @@ class PhysicalTableServer:
             def do_POST(self):
                 body = self._read_json()
                 try:
-                    if self.path.split("?",1)[0] == "/api/game/decision":
+                    route = self.path.split("?", 1)[0]
+                    if route == "/api/pod/start":
+                        result = app.pod_session.start(body)
+                        code = 400 if result.get("status") == "error" else \
+                            409 if result.get("status") == "busy" else 200
+                        self._send_json(code, result)
+                    elif route == "/api/pod/stop":
+                        self._send_json(200, app.pod_session.stop())
+                    elif route == "/api/game/decision":
                         self._send_json(200, app.human_game.decide(body))
                     elif self.path.split("?",1)[0] == "/api/event":
                         out = app.apply_player_event(
@@ -1220,3 +1235,4 @@ class PhysicalTableServer:
         if self._http is not None:
             self._http.shutdown()
             self._http = None
+        self.app.pod_session.close()

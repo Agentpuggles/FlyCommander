@@ -1,162 +1,283 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FlyCommander · Commander pod</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#11120f">
+<title>FlyCommander · Digital Forge Commander</title>
 <style>
-:root{color-scheme:dark}body{margin:0;background:#12141a;color:#e8ecf4;font:15px/1.5 system-ui}main{max-width:1200px;margin:auto;padding:24px}h1{margin:0}a{color:#7fd4ff}.notice,section{border:1px solid #3d4659;border-radius:10px;padding:18px;margin:16px 0;background:#1b1f2a}.notice{border-color:#c7a65a}#seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}#seats section{margin:0}button{padding:12px;margin:8px 8px 0 0;background:#285a47;color:white;border:1px solid #6aaf89;border-radius:6px;cursor:pointer}button:disabled{opacity:.4}pre{white-space:pre-wrap;font:inherit}small{color:#abb7cb}.card{padding:5px 0;border-bottom:1px solid #343c4a}h3{margin-bottom:4px}#error{color:#ffb1a4}#decisionState{min-height:1.5em;color:#ffd479;font-weight:600}
-</style><main>
-<header><small>FLYCOMMANDER / FOUR-SEAT COMMANDER</small><h1>Your paper table, a digital rules engine</h1><a href="/">Open scanner workspace</a></header>
-<div id="testMode" class="notice" hidden>CONTROLLER TEST — Forge-generated digital hand. NOT physical paper gameplay. Human priority controls currently support explicit pass only.</div>
-<div class="notice"><b>Controller-test digital-hand prototype — handshake and priority regression runtime-verified</b><p>The real Forge 2.0.15 controller handshake and priority-pass regression have been verified locally. Human keep/mulligan and explicit pass responses go to Forge; casting, targeting, mana and combat controls remain incomplete. This is not a complete paper Commander game.</p><p>Controller tests use Forge-generated digital hands, not your physical hand. Physical deck/hand synchronization is not implemented. Scanning records identity only; it never casts a spell or changes this game.</p></div>
-<section><h2 id="status">Checking connection…</h2><p id="error" role="alert"></p><div id="setup"><p>Build the agent against the pinned Forge 2.0.15 source with Java 17, then start the explicit controller test. Three independent Fly brains are started by the launcher.</p><pre>python3 scripts/build_forge_source.py
-.venv/bin/python scripts/run_physical_pod.py --controller-test \
-  --human-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck</pre><small>This command tests digital-hand controller transport, not paper gameplay. Keep this page open to answer Forge's pending requests.</small></div></section>
-<section id="decision" hidden><h2 id="kind"></h2><pre id="message"></pre><p id="decisionState" role="status" aria-live="polite"></p><div id="choices"></div></section>
-<div id="seats"></div><section><h2>Stack</h2><pre id="stack">No connected game</pre></section>
-</main><script>
-// Selection and delivery state belong to a prompt ID, not to transient DOM nodes.
-let currentPrompt=null;
-let inFlight=false;
-let connectionAvailable=false;
-let refreshSerial=0;
-let deliveryRevision=0;
-const el=id=>document.getElementById(id);
-function node(tag,text){const n=document.createElement(tag);n.textContent=text;return n}
-function decisionKey(prompt){
- return JSON.stringify([prompt.options||[],prompt.choices||[],prompt.min,prompt.max]);
+:root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--panel2:#22251f;--line:#363c32;--muted:#aab3a2;--text:#f0f2e9;--mint:#b6e69b;--mint2:#d5f2c3;--gold:#e8c879;--red:#ff9f8e;--shadow:0 18px 50px #0005}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 65% -20%,#303c2a 0,#171a15 38%,var(--bg) 75%);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}button,select,textarea,input{font:inherit}button{cursor:pointer;color:#131710;background:var(--mint);border:0;border-radius:9px;font-weight:750;padding:11px 15px;transition:transform .15s,background .15s}button:hover{background:var(--mint2);transform:translateY(-1px)}button:disabled{opacity:.48;cursor:not-allowed;transform:none}button.secondary{background:#2b3028;color:var(--text);border:1px solid #485043}button.secondary:hover{background:#363d32}button.danger{background:#60332b;color:#ffe0d8;border:1px solid #965849}button.danger:hover{background:#754035}a{color:var(--mint)}header{max-width:1460px;margin:auto;padding:22px 26px 12px;display:flex;align-items:center;justify-content:space-between;gap:18px}.brand{display:flex;align-items:center;gap:12px}.mark{width:43px;height:43px;border-radius:13px;display:grid;place-items:center;background:#293a25;border:1px solid #516447;font-size:23px}.eyebrow{color:var(--mint);font-size:11px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}.brand h1{font-size:24px;line-height:1.1;margin:2px 0 0;letter-spacing:-.025em}.toplinks{display:flex;gap:16px;align-items:center;color:var(--muted);font-size:13px}.toplinks a{text-decoration:none}.wrap{max-width:1460px;margin:0 auto;padding:8px 26px 44px}.intro{display:flex;justify-content:space-between;align-items:end;gap:24px;margin:18px 0 20px}.intro h2{font-size:34px;line-height:1.12;letter-spacing:-.035em;margin:0 0 8px}.intro p{color:var(--muted);margin:0;max-width:760px}.badge{display:inline-flex;gap:8px;align-items:center;padding:7px 11px;border:1px solid #4f6142;border-radius:999px;color:var(--mint);background:#202b1a;font-size:12px;font-weight:700;white-space:nowrap}.grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(310px,.85fr);gap:18px;align-items:start}.panel{background:linear-gradient(155deg,#20231d,#181a16);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:19px}.panel h2,.panel h3{margin:0}.section-title{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:12px}.section-title h2{font-size:17px;letter-spacing:-.01em}.muted{color:var(--muted)}.tiny{font-size:12px}.setup-card{margin-bottom:18px}.setup-intro{display:grid;grid-template-columns:1fr auto;align-items:start;gap:20px;padding-bottom:16px;border-bottom:1px solid var(--line)}.setup-intro h3{font-size:18px;margin:0 0 4px}.setup-intro p{margin:0;color:var(--muted);max-width:860px}.number{width:29px;height:29px;border:1px solid #546449;background:#293523;color:var(--mint);border-radius:9px;display:grid;place-items:center;font-weight:800;flex:none}.step-title{display:flex;gap:10px;align-items:center}.field{margin-top:16px}.field label,.field-label{display:block;font-size:13px;font-weight:750;margin-bottom:7px}.hint{font-size:12px;color:var(--muted);margin:6px 0 0}.deck-editor{width:100%;min-height:178px;resize:vertical;padding:12px 14px;color:#f4f5ed;background:#11130f;border:1px solid #3b4136;border-radius:10px;outline:none;font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace}.deck-editor:focus{border-color:#8db874;box-shadow:0 0 0 3px #91bd6922}.split{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:16px}.opponent{background:#151713;border:1px solid #343a30;border-radius:12px;padding:13px}.opponent-top{display:flex;justify-content:space-between;align-items:center;gap:9px}.opponent-title{font-weight:800;font-size:13px}.opponent-sub{color:var(--muted);font-size:11px;margin-top:2px}.opponent select{max-width:100%;margin:11px 0 7px;width:100%;color:var(--text);background:#252922;border:1px solid #454c40;border-radius:8px;padding:8px}.opponent .deck-editor{min-height:118px;font-size:12px}.actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:16px}.ack{display:flex;gap:10px;align-items:flex-start;color:#d7ddcf;font-size:12px;max-width:760px}.ack input{margin-top:3px;accent-color:#acd68e}.setup-error{margin-top:12px;color:var(--red);font-size:13px;min-height:1.4em}.status-note{padding:11px 13px;border-radius:10px;background:#22271f;border:1px solid #3d4c36;color:#c8d5bd;font-size:12px;margin-top:13px}.status-note strong{color:#e5eddb}.camera{padding:0;overflow:hidden}.camera-head{padding:16px 17px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px}.camera-head h2{font-size:16px}.camera-stage{position:relative;background:#080a07;aspect-ratio:16/10;display:grid;place-items:center;overflow:hidden}.camera-stage video{width:100%;height:100%;object-fit:cover;display:none}.camera-stage video.active{display:block}.camera-placeholder{text-align:center;color:#8f9887;padding:24px}.camera-placeholder .cam-icon{font-size:29px;margin-bottom:7px}.camera-controls{padding:12px 15px 15px;display:flex;justify-content:space-between;gap:12px;align-items:center}.camera-status{font-size:11px;color:var(--muted)}.cam-button{padding:8px 11px;font-size:12px}.camera-foot{border-top:1px solid var(--line);padding:10px 15px 14px;color:#909989;font-size:11px}.game-panel{margin-top:18px}.game-toolbar{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}.game-meta{font-size:13px;color:var(--muted)}.game-meta strong{color:var(--text)}.seats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-top:14px}.seat{background:#151713;border:1px solid #343a30;border-radius:12px;padding:13px;min-width:0}.seat.human{border-color:#708f5b;box-shadow:inset 0 0 0 1px #597448;background:linear-gradient(145deg,#20291c,#171a15)}.seat.active{box-shadow:0 0 0 2px #d9bb66}.seat-head{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.seat-name{font-weight:850;line-height:1.25}.seat-life{color:var(--gold);font-weight:850;font-size:20px;white-space:nowrap}.seat-stats{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin:3px 0 10px}.zone{margin-top:10px}.zone-label{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9aa48f;font-weight:800;margin-bottom:4px}.cards{display:flex;flex-wrap:wrap;gap:5px}.game-card{font-size:11px;border:1px solid #40473c;background:#252a22;border-radius:7px;padding:4px 7px;line-height:1.25;max-width:100%;overflow-wrap:anywhere}.game-card.tapped{opacity:.72;transform:rotate(0deg);border-color:#7d6a45}.empty{font-size:11px;color:#727b6e;font-style:italic}.private-hand{padding:9px;background:#1e2819;border:1px solid #3c5132;border-radius:9px}.stack{margin-top:14px;padding:12px;border:1px solid var(--line);background:#151713;border-radius:11px}.stack-title{font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#9aa48f;font-weight:800;margin-bottom:6px}.stack-list{font-size:12px;color:#d5dacd}.prompt{margin-top:16px;border:1px solid #8a7540;background:linear-gradient(140deg,#2a281c,#1d1e17);border-radius:13px;padding:15px}.prompt[hidden]{display:none}.prompt-kicker{color:var(--gold);font-size:10px;letter-spacing:.15em;text-transform:uppercase;font-weight:850}.prompt h3{margin:4px 0 7px;font-size:18px}.prompt-message{white-space:pre-wrap;color:#d4d9ca;font-size:13px}.option-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}.option{background:#272a22;color:#ecf0e6;border:1px solid #545c4c;text-align:left;max-width:100%;font-size:13px;padding:9px 12px}.option.selected{background:#3b4b30;border-color:#a7d18b;box-shadow:0 0 0 1px #acd58d}.prompt-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:13px}.prompt-status{font-size:12px;color:var(--gold);min-height:1em}.session-log{margin-top:14px}.session-log summary{cursor:pointer;color:var(--muted);font-size:12px}.session-log pre{max-height:220px;overflow:auto;white-space:pre-wrap;color:#97a28e;font-size:11px;background:#10120e;padding:10px;border-radius:8px}.warning{border-color:#806b3f;background:#262317}.hidden{display:none!important}.footer-note{margin-top:15px;color:#818a7b;font-size:11px;text-align:center}.error-text{color:var(--red)}
+@media(max-width:1050px){.grid{grid-template-columns:1fr}.camera{order:-1}.camera-stage{aspect-ratio:16/8}.seats{grid-template-columns:repeat(2,minmax(0,1fr))}.intro{align-items:start;flex-direction:column}.split{grid-template-columns:1fr}}
+@media(max-width:600px){header{padding:16px 15px 8px}.wrap{padding:8px 14px 32px}.brand h1{font-size:20px}.toplinks{font-size:11px;gap:8px}.intro h2{font-size:28px}.panel{padding:14px}.seats{grid-template-columns:1fr}.camera-stage{aspect-ratio:4/3}.setup-intro{grid-template-columns:1fr}.setup-intro>.number{display:none}.game-toolbar{align-items:flex-start}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><div class="mark">🪰</div><div><div class="eyebrow">FlyCommander · Four-seat Commander</div><h1>Digital Forge Commander</h1></div></div>
+  <nav class="toplinks"><a href="/">Card scanner</a><span>·</span><a href="https://spelltable.wizards.com/" target="_blank" rel="noreferrer">Spelltable</a></nav>
+</header>
+<div class="wrap">
+  <section class="intro">
+    <div><h2>Forge rules. Human decisions.<br>Three Forge AI seats.</h2><p>Choose your Commander deck and play a four-seat digital Forge game from the browser. Forge owns the rules and game state. This controller prototype does not synchronize physical cards, a physical library, or camera-observed actions.</p></div>
+    <div class="badge"><span>●</span> Digital Forge · physical sync not installed</div>
+  </section>
+
+  <div class="grid">
+    <div>
+      <section class="panel setup-card" id="setupPanel">
+        <div class="setup-intro"><div><div class="step-title"><span class="number">1</span><h3>Build your pod</h3></div><p>Paste your Commander deck and choose a random Forge precon or a deck list for each AI. A deck list needs one or two cards under <b>Commander</b> and enough cards under <b>Mainboard</b> to total 100.</p></div><span class="badge">4 seats</span></div>
+        <div class="field">
+          <label for="humanDeck">Your Commander deck list</label>
+          <textarea id="humanDeck" class="deck-editor" spellcheck="false" aria-label="Your Commander deck list" placeholder="Commander\n1 Your Commander\n\nMainboard\n1 Sol Ring\n1 Arcane Signet\n...\n99 cards including commander"></textarea>
+          <p class="hint">Common plain-text exports work. Card names are resolved by Forge when the game loads. Set codes are accepted and ignored for rules identity.</p>
+        </div>
+        <div class="field">
+          <span class="field-label">AI opponents</span>
+          <div class="split" id="opponentList"></div>
+        </div>
+        <div class="actions">
+          <button id="startButton" onclick="startPod()">Start 4-player Commander</button>
+          <label class="ack"><input type="checkbox" id="paperAck"><span>I understand this is a <b>digital Forge controller prototype</b>. Forge supplies the shuffle, draws and private hand. Physical-card identity, physical library order and camera observations are not synchronized; scanning never plays a card.</span></label>
+        </div>
+        <div id="setupError" class="setup-error" role="alert"></div>
+        <div id="runtimeNote" class="status-note"><strong>Need Forge first?</strong> Build the pinned Forge 2.0.15 runtime and FlyCommander agent with <code>python3 scripts/build_forge_source.py</code>. Then choose your camera and start the pod here.</div>
+        <div class="actions hidden" id="stopRow"><button class="danger" onclick="stopPod()">Stop pod</button><span id="podStatus" class="muted tiny"></span></div>
+      </section>
+
+      <section class="panel game-panel hidden" id="gamePanel">
+        <div class="game-toolbar"><div><div class="eyebrow">Live game</div><h2 style="font-size:21px">Four-seat Commander</h2></div><div class="game-meta"><strong id="turnLabel">Waiting for Forge…</strong><br><span id="activeLabel"></span></div><button class="secondary" onclick="stopPod()">End game</button></div>
+        <div class="status-note" id="paperModeNote"><strong>Prototype limitation:</strong> Forge's digital deck and private hand are authoritative. Physical cards, library order and camera observations are not connected to game actions; scans only identify cards.</div>
+        <div class="seats" id="seats"></div>
+        <div class="stack"><div class="stack-title">Stack</div><div class="stack-list" id="stack">Empty</div></div>
+        <section id="prompt" class="prompt" hidden>
+          <div class="prompt-kicker" id="promptKind">Your choice</div><h3 id="promptTitle">Forge is waiting</h3>
+          <div class="prompt-message" id="promptMessage"></div>
+          <div class="option-list" id="promptOptions"></div>
+          <div class="prompt-actions"><button id="confirmButton" onclick="confirmPrompt()">Confirm choice</button><button id="cancelButton" class="secondary hidden" onclick="cancelPrompt()">Cancel</button><span class="prompt-status" id="promptStatus" role="status" aria-live="polite"></span></div>
+        </section>
+        <details class="session-log"><summary>Pod startup log and resolved AI decks</summary><pre id="sessionLog"></pre></details>
+      </section>
+    </div>
+
+    <aside>
+      <section class="panel camera">
+        <div class="camera-head"><div><div class="eyebrow">Your play space</div><h2>Webcam table view</h2></div><span class="badge" id="cameraBadge">Camera off</span></div>
+        <div class="camera-stage">
+          <div class="camera-placeholder" id="cameraPlaceholder"><div class="cam-icon">▣</div><div>Turn on your webcam to see your cards</div><div class="tiny" style="margin-top:5px">Use an overhead/table-facing angle like a Spelltable setup.</div></div>
+          <video id="cameraVideo" playsinline autoplay muted></video>
+        </div>
+        <div class="camera-controls"><span class="camera-status" id="cameraStatus">Video stays in this browser; FlyCommander does not upload it.</span><button class="secondary cam-button" id="cameraButton" onclick="toggleCamera()">Enable webcam</button></div>
+        <div class="camera-foot">On a remote browser, camera access requires HTTPS and permission. You can also open the scanner workspace to identify cards; scanner confirmations never cast or move a game card.</div>
+      </section>
+      <section class="panel warning" style="margin-top:16px"><div class="section-title"><h2>How the pod plays</h2><span class="tiny">3 Forge AI seats</span></div><p class="muted tiny" style="margin:0">The default opponents are Forge AI, with no Fly service required. You choose actions from Forge's digital game state; Forge resolves every rule and effect. Physical-card matching and camera-based action submission are not installed.</p><p class="tiny" style="margin:10px 0 0"><a href="/" target="_blank" rel="noreferrer">Open the card scanner ↗</a> <span class="muted">(identification only; not game control)</span></p></section>
+    </aside>
+  </div>
+  <div class="footer-note">FlyCommander is a local single-player game tool. It does not create an authenticated multiplayer room or stream your webcam. Anyone who can reach this server can answer prompts; use a trusted network.</div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let cameraStream = null;
+let pollTimer = null;
+let promptState = null;
+let requestInFlight = false;
+let latestPod = null;
+
+const SAMPLE = 'Commander\n1 The Gitrog Monster (SOI) 245\n\nMainboard\n99 Forest';
+const opponents = [1,2,3];
+function buildOpponentInputs(){
+  $('opponentList').replaceChildren();
+  for(const n of opponents){
+    const panel=document.createElement('div');panel.className='opponent';
+    const top=document.createElement('div');top.className='opponent-top';
+    const label=document.createElement('div');label.innerHTML=`<div class="opponent-title">Forge AI opponent ${n}</div><div class="opponent-sub">Independent Forge AI seat</div>`;
+    const dot=document.createElement('span');dot.className='number';dot.textContent=n;
+    top.append(label,dot);panel.append(top);
+    const select=document.createElement('select');select.id=`aiMode${n}`;select.setAttribute('aria-label',`Deck for AI opponent ${n}`);
+    select.innerHTML='<option value="random">Random Forge Commander precon</option><option value="custom">Use my deck list</option>';
+    select.onchange=()=>{const area=$(`aiDeck${n}`);area.classList.toggle('hidden',select.value!=='custom')};panel.append(select);
+    const area=document.createElement('textarea');area.id=`aiDeck${n}`;area.className='deck-editor hidden';area.spellcheck=false;area.setAttribute('aria-label',`AI opponent ${n} Commander deck list`);area.placeholder='Commander\n1 AI Commander\n\nMainboard\n99 cards';panel.append(area);
+    $('opponentList').append(panel);
+  }
 }
-function updateDecisionControls(){
- if(!currentPrompt)return;
- const state=currentPrompt;
- const locked=inFlight||!connectionAvailable||state.phase!=='ready';
- for(const [id,button] of state.optionButtons){
-  const selected=state.selected.includes(id);
-  button.style.outline=selected?'2px solid gold':'';
-  button.setAttribute('aria-pressed',String(selected));
-  button.disabled=locked;
- }
- for(const button of state.choiceButtons)button.disabled=locked;
- if(state.submit){
-  const min=state.prompt.min??0;
-  const max=state.prompt.max??state.optionButtons.size;
-  state.submit.disabled=locked||state.selected.length<min||state.selected.length>max;
-  state.submit.textContent=state.phase==='submitting'?'Submitting…':state.phase==='accepted'?'Accepted':'Confirm selection';
- }
- let text=state.feedback;
- if(state.phase==='submitting')text='Submitting… Waiting for the server acknowledgement.';
- else if(state.phase==='accepted')text='Accepted — waiting for Forge’s next prompt. This decision will not be sent again.';
- else if(state.phase==='uncertain')text='Submission status unknown. The connection failed; this does not mean Forge rejected the decision. Waiting for refreshed state; do not resend this prompt.';
- else if(!text)text=state.selected.length?'Selection saved. Click Confirm selection to send it to Forge.':'Choose an option, then confirm your selection.';
- if(!connectionAvailable)text+=' Connection unavailable; selection and delivery state have been preserved.';
- el('decisionState').textContent=text;
+buildOpponentInputs();
+
+async function api(path, body){
+  const response=await fetch(path,body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
+  let result={};try{result=await response.json()}catch(e){}
+  if(!response.ok)throw new Error(result.error||`Request failed (${response.status})`);
+  return result;
 }
-function renderDecision(prompt){
- if(!prompt){
-  currentPrompt=null;
-  el('decision').hidden=true;
-  el('choices').replaceChildren();
-  el('decisionState').textContent='';
-  return;
- }
- el('decision').hidden=false;
- if(!currentPrompt||currentPrompt.id!==prompt.id){
-  currentPrompt={id:prompt.id,prompt,selected:[],phase:'ready',feedback:'',key:null,
-   optionButtons:new Map(),choiceButtons:[],submit:null};
- }
- const state=currentPrompt;
- state.prompt=prompt;
- el('kind').textContent=prompt.kind;
- el('message').textContent=prompt.message;
- const key=decisionKey(prompt);
- // Polling identical options must not discard focus, highlights or submit state.
- if(state.key!==key){
-  state.key=key;
-  el('choices').replaceChildren();
-  state.optionButtons=new Map();state.choiceButtons=[];state.submit=null;
-  const allowed=new Set((prompt.options||[]).map(option=>option.id));
-  if(state.phase==='ready')state.selected=state.selected.filter(id=>allowed.has(id));
-  for(const option of prompt.options||[]){
-   const button=node('button',option.label);
-   button.onclick=()=>{
-    if(currentPrompt!==state||inFlight||!connectionAvailable||state.phase!=='ready')return;
-    const index=state.selected.indexOf(option.id);
-    if(index>=0)state.selected.splice(index,1);else state.selected.push(option.id);
-    state.feedback='';updateDecisionControls();
-   };
-   state.optionButtons.set(option.id,button);el('choices').append(button);
+async function startPod(){
+  const error=$('setupError');error.textContent='';
+  if(!$('paperAck').checked){error.textContent='Please confirm the digital Forge prototype and physical-sync limitation before starting.';return}
+  const humanDeck=$('humanDeck').value.trim();
+  if(!humanDeck){error.textContent='Paste your Commander deck list first.';return}
+  const ai=[];
+  for(const n of opponents){const mode=$(`aiMode${n}`).value;ai.push(mode==='custom'?{mode,deck:$(`aiDeck${n}`).value.trim()}:{mode})}
+  $('startButton').disabled=true;$('startButton').textContent='Starting Forge…';
+  try{
+    const result=await api('/api/pod/start',{humanDeck,opponents:ai});
+    $('podStatus').textContent=result.message||'Starting pod…';
+    $('stopRow').classList.remove('hidden');
+    $('gamePanel').classList.remove('hidden');
+    $('runtimeNote').classList.add('hidden');
+    $('gamePanel').scrollIntoView({behavior:'smooth',block:'start'});
+    await refresh();
+  }catch(e){error.textContent=e.message}
+  finally{const active=['starting','running'].includes(latestPod?.status);$('startButton').disabled=active;$('startButton').textContent=active?'Pod starting…':'Start 4-player Commander'}
+}
+async function stopPod(){
+  $('podStatus').textContent='Stopping the pod…';
+  try{await api('/api/pod/stop',{});await refresh()}catch(e){$('setupError').textContent=e.message}
+}
+
+async function toggleCamera(){
+  if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;$('cameraVideo').srcObject=null;$('cameraVideo').classList.remove('active');$('cameraPlaceholder').classList.remove('hidden');$('cameraBadge').textContent='Camera off';$('cameraButton').textContent='Enable webcam';$('cameraStatus').textContent='Video stays in this browser; FlyCommander does not upload it.';return}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){$('cameraStatus').textContent='Camera unavailable here. Open this page on HTTPS or localhost, then allow camera access.';return}
+  try{cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});$('cameraVideo').srcObject=cameraStream;$('cameraVideo').classList.add('active');$('cameraPlaceholder').classList.add('hidden');$('cameraBadge').textContent='Live preview';$('cameraButton').textContent='Turn camera off';$('cameraStatus').textContent='Live on this device only · not streamed or uploaded.'}
+  catch(e){$('cameraStatus').textContent=`Could not start camera: ${e.message}. Check browser permission and use HTTPS or localhost.`}
+}
+
+function renderSeats(s){
+  const root=$('seats');root.replaceChildren();
+  const seats=s.seats||[];let aiIndex=0;
+  for(const seat of seats){
+    const card=document.createElement('article');card.className='seat'+(seat.human?' human':'')+(seat.name===s.activePlayer?' active':'');
+    const head=document.createElement('div');head.className='seat-head';
+    const name=document.createElement('div');name.className='seat-name';name.textContent=seat.human?'You · Forge human':seat.name;
+    const life=document.createElement('div');life.className='seat-life';life.textContent=`${seat.life} life`;head.append(name,life);card.append(head);
+    const meta=document.createElement('div');meta.className='seat-stats';meta.textContent=`${seat.handCount??0} cards in hand · ${seat.libraryCount??0} in library${seat.poison?` · ${seat.poison} poison`:''}`;card.append(meta);
+    if(!seat.human){const deck=(s.opponentDecks||[])[aiIndex++];if(deck){const d=document.createElement('div');d.className='tiny muted';d.textContent=`Deck: ${deck}`;card.append(d)}}
+    const damage=Object.entries(seat.commanderDamage||{}).filter(([,amount])=>amount>0);
+    if(damage.length){const d=document.createElement('div');d.className='tiny';d.style.color='var(--red)';d.textContent='Commander damage: '+damage.map(([name,amount])=>`${name} ${amount}`).join(' · ');card.append(d)}
+    const zones=['Command','Battlefield','Graveyard','Exile'];
+    for(const zoneName of zones){const list=seat[zoneName]||[];const zone=document.createElement('div');zone.className='zone';const label=document.createElement('div');label.className='zone-label';label.textContent=zoneName;zone.append(label);
+      const items=document.createElement('div');items.className='cards';
+      if(!list.length){const none=document.createElement('span');none.className='empty';none.textContent='—';items.append(none)}
+      for(const c of list){const chip=document.createElement('span');chip.className='game-card'+(c.tapped?' tapped':'');let text=c.name;if(c.creature&&c.power!=null)text+=` ${c.power}/${c.toughness}`;if(c.tapped)text+=' · tapped';chip.textContent=text;chip.title=text;items.append(chip)}
+      zone.append(items);card.append(zone);
+    }
+    if(seat.human){const zone=document.createElement('div');zone.className='zone private-hand';const label=document.createElement('div');label.className='zone-label';label.textContent='Forge digital hand · only visible to you';zone.append(label);const items=document.createElement('div');items.className='cards';for(const c of seat.Hand||[]){const chip=document.createElement('span');chip.className='game-card';chip.textContent=c.name;items.append(chip)}if(!(seat.Hand||[]).length){const none=document.createElement('span');none.className='empty';none.textContent='Waiting for opening hand';items.append(none)}zone.append(items);card.append(zone)}
+    root.append(card);
   }
-  if(prompt.options){
-   state.submit=node('button','Confirm selection');
-   state.submit.onclick=()=>send(state.id,[...state.selected]);
-   el('choices').append(state.submit);
+  $('turnLabel').textContent=`Turn ${s.turn??'—'} · ${s.phase||'—'}`;
+  $('activeLabel').textContent=s.activePlayer?`${s.activePlayer} has the turn`:'';
+  $('stack').textContent=(s.stack||[]).join('\n')||'Empty';
+  if(s.paper)$('paperModeNote').innerHTML=`<strong>Prototype limitation:</strong> ${escapeHtml(s.paper)}`;
+}
+function escapeHtml(text){return String(text).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function promptAction(prompt,id){return (prompt.actions||[]).find(action=>action.id===id)}
+function typedValueValid(prompt){
+  const input=prompt.input||{},value=promptState?.value??'';
+  if(input.type==='integer'){
+    if(value.trim()==='')return false;
+    const number=Number(value);return Number.isInteger(number)&&number>=input.min&&number<=input.max;
   }
-  for(const choice of prompt.choices||[]){
-   const button=node('button',choice);
-   button.onclick=()=>send(state.id,choice);
-   state.choiceButtons.push(button);el('choices').append(button);
+  return input.type==='text'&&value.length>=input.min&&value.length<=input.max;
+}
+function renderPrompt(prompt){
+  if(!prompt){promptState=null;$('prompt').hidden=true;$('promptOptions').replaceChildren();$('cancelButton').classList.add('hidden');return}
+  $('prompt').hidden=false;
+  if(!promptState||promptState.id!==prompt.id){promptState={id:prompt.id,prompt,selected:[],phase:'ready',feedback:'',value:'',restoreInputFocus:false,inputSelectionStart:null,inputSelectionEnd:null}}
+  const activeInput=document.activeElement?.id==='typedDecisionInput'?document.activeElement:null;
+  if(activeInput){promptState.inputSelectionStart=activeInput.selectionStart;promptState.inputSelectionEnd=activeInput.selectionEnd}
+  const shouldRestoreInputFocus=Boolean(activeInput)||promptState.restoreInputFocus;
+  promptState.prompt=prompt;
+  $('promptKind').textContent=(prompt.kind||'choice').replaceAll('_',' ');
+  const titles={priority:'Your priority',mulligan:'Opening hand',mulligan_bottom:'Bottom cards',choose_targets:'Choose targets',declare_attackers:'Declare attackers',declare_blockers:'Declare blockers',pay_mana:'Pay mana',choose_number:'Choose a number',text_input:'Enter a value'};
+  $('promptTitle').textContent=titles[prompt.kind]||'Your Forge decision';$('promptMessage').textContent=prompt.message||'';
+  const root=$('promptOptions');root.replaceChildren();
+  const actions=Array.isArray(prompt.actions)?prompt.actions:[];
+  const cancel=promptAction(prompt,'cancel');
+  $('cancelButton').classList.toggle('hidden',!cancel);
+  $('cancelButton').disabled=promptState.phase!=='ready'||requestInFlight;
+  if(prompt.input){
+    const spec=prompt.input,input=document.createElement('input');
+    input.id='typedDecisionInput';input.type=spec.type==='integer'?'number':'text';input.autocomplete='off';input.inputMode=spec.type==='integer'?'numeric':'text';
+    input.style.cssText='width:min(100%,420px);padding:10px 12px;color:#f4f5ed;background:#11130f;border:1px solid #3b4136;border-radius:8px';
+    if(spec.type==='integer'){input.min=spec.min;input.max=spec.max;input.step='1'}
+    else{input.minLength=spec.min;input.maxLength=spec.max}
+    input.value=promptState.value;input.setAttribute('aria-label',spec.type==='integer'?'Forge numeric choice':'Forge text choice');
+    input.disabled=promptState.phase!=='ready'||requestInFlight;
+    input.oninput=()=>{promptState.value=input.value;$('confirmButton').disabled=promptState.phase!=='ready'||requestInFlight||!typedValueValid(prompt)};root.append(input);
+    if(shouldRestoreInputFocus&&!input.disabled){
+      input.focus();
+      if(spec.type==='text'){
+        const start=Number.isInteger(promptState.inputSelectionStart)?Math.min(input.value.length,promptState.inputSelectionStart):input.value.length;
+        const end=Number.isInteger(promptState.inputSelectionEnd)?Math.min(input.value.length,promptState.inputSelectionEnd):start;
+        input.setSelectionRange(start,end);
+      }
+      promptState.restoreInputFocus=false;
+    }else promptState.restoreInputFocus=shouldRestoreInputFocus;
+    $('confirmButton').classList.remove('hidden');$('confirmButton').textContent=promptState.phase==='accepted'?'Accepted':(promptAction(prompt,'confirm')?.label||'Submit value');
+    $('confirmButton').disabled=promptState.phase!=='ready'||requestInFlight||!typedValueValid(prompt);
+    $('promptStatus').textContent=promptState.phase==='accepted'?'Accepted — waiting for Forge.':promptState.feedback||`Allowed: ${spec.min}–${spec.max}`;
+  }else if(Array.isArray(prompt.options)){
+    const valid=new Set(prompt.options.map(x=>x.id));promptState.selected=promptState.selected.filter(x=>valid.has(x));
+    for(const opt of prompt.options){const b=document.createElement('button');b.className='option'+(promptState.selected.includes(opt.id)?' selected':'');b.type='button';b.textContent=opt.label;b.setAttribute('aria-pressed',String(promptState.selected.includes(opt.id)));b.disabled=promptState.phase!=='ready'||requestInFlight;b.onclick=()=>toggleOption(opt.id);root.append(b)}
+    const min=prompt.min??0,max=prompt.max??prompt.options.length;
+    $('confirmButton').classList.remove('hidden');$('confirmButton').disabled=promptState.phase!=='ready'||requestInFlight||promptState.selected.length<min||promptState.selected.length>max;
+    $('confirmButton').textContent=promptState.phase==='accepted'?'Accepted':(promptAction(prompt,'confirm')?.label||'Confirm selection');
+    $('promptStatus').textContent=promptState.phase==='accepted'?'Accepted — waiting for the next Forge prompt.':promptState.feedback||`${promptState.selected.length} selected · choose ${min}${max!==min?`–${max}`:''}`;
+  }else if(Array.isArray(prompt.choices)){
+    $('confirmButton').classList.add('hidden');
+    for(const choice of prompt.choices){const b=document.createElement('button');b.className='option';b.type='button';b.textContent=choice;b.disabled=promptState.phase!=='ready'||requestInFlight;b.onclick=()=>sendDecision({id:prompt.id,choice});root.append(b)}
+    $('promptStatus').textContent=promptState.phase==='accepted'?'Accepted — waiting for Forge.':promptState.feedback||'Choose one option.';
+  }else{
+    $('confirmButton').classList.add('hidden');$('promptStatus').textContent='This prompt has no supported choices; game is paused safely.';
   }
- }
- updateDecisionControls();
+}
+function toggleOption(id){
+  if(!promptState||promptState.phase!=='ready'||requestInFlight)return;
+  const options=promptState.prompt.options||[];const max=promptState.prompt.max??options.length;
+  const at=promptState.selected.indexOf(id);
+  if(at>=0)promptState.selected.splice(at,1);else if(promptState.selected.length<max){if((promptState.prompt.max??1)===1)promptState.selected=[id];else promptState.selected.push(id)}
+  renderPrompt(promptState.prompt);
+}
+async function confirmPrompt(){
+  if(!promptState)return;
+  const prompt=promptState.prompt;
+  const selected=prompt.input?[promptState.value]:[...promptState.selected];
+  const confirm=promptAction(prompt,'confirm');
+  await sendDecision({id:promptState.id,selected,...(confirm?{action:confirm.id}:{})});
+}
+async function cancelPrompt(){
+  if(!promptState||!promptAction(promptState.prompt,'cancel'))return;
+  await sendDecision({id:promptState.id,selected:[],action:'cancel'});
+}
+async function sendDecision(body){
+  if(requestInFlight||!promptState||body.id!==promptState.id)return;
+  requestInFlight=true;promptState.phase='submitting';renderPrompt(promptState.prompt);
+  try{const r=await api('/api/game/decision',body);if(r.status==='accepted'){promptState.phase='accepted';promptState.feedback=''}else if(r.status==='rejected'){promptState.phase='ready';promptState.feedback=r.error||'That choice was rejected; refresh and choose again.'}else{promptState.phase='uncertain';promptState.feedback=r.error||'Response status unknown; do not resend until the prompt refreshes.'}}
+  catch(e){promptState.phase='uncertain';promptState.feedback=e.message}
+  finally{requestInFlight=false;renderPrompt(promptState.prompt);await refresh()}
+}
+function renderPodStatus(p){
+  latestPod=p;
+  const active=['starting','running'].includes(p.status);
+  $('startButton').disabled=active;$('stopRow').classList.toggle('hidden',!active);
+  if(p.status==='failed'||p.status==='error')$('setupError').textContent=p.error||'Pod failed to start.';
+  else if(active)$('setupError').textContent='';
+  if(active){$('gamePanel').classList.remove('hidden');$('runtimeNote').classList.add('hidden');$('podStatus').textContent=p.status==='running'?'Forge match running':'Starting Forge runtime…'}
+  if(p.status==='finished')$('podStatus').textContent='Game finished.';
+  if(p.status==='stopped')$('podStatus').textContent='Pod stopped.';
+  if(p.status==='failed')$('podStatus').textContent='Pod stopped with an error.';
+  const lines=[];if(p.resolvedAiDecks?.length)lines.push('Resolved AI Commander decks: '+p.resolvedAiDecks.join(' · '));lines.push(...(p.log||[]));$('sessionLog').textContent=lines.join('\n')||'No Forge output yet.';
+  if(p.status==='failed'||p.status==='finished'||p.status==='stopped'){$('startButton').disabled=false;$('startButton').textContent='Start another pod'}else{$('startButton').textContent='Start 4-player Commander'}
 }
 async function refresh(){
- const serial=++refreshSerial;
- const revision=deliveryRevision;
- try{
- const response=await fetch('/api/game');
- if(!response.ok)throw new Error('State request failed');
- const s=await response.json();
- // A GET started before a POST acknowledgement cannot undo delivery feedback.
- if(serial!==refreshSerial||revision!==deliveryRevision)return;
- connectionAvailable=s.status!=='disconnected'&&s.status!=='rejected'&&!s.error;
- el('testMode').hidden=s.mode!=='controller-test-digital-hand';
- el('status').textContent=s.status==='awaiting_decision'?(s.prompt?.kind==='priority'?'YOUR PRIORITY':'Your Forge decision'):s.status==='disconnected'?'No game connection — decision state preserved':`Game: ${s.status}`;
- el('setup').hidden=(connectionAvailable&&s.mode==='controller-test-digital-hand')||Array.isArray(s.seats);
- el('error').textContent=s.error||'';
- el('seats').replaceChildren();
- for(const seat of s.seats||[]){const panel=node('section','');panel.append(node('h2',seat.name),node('p',`${seat.life} life · ${seat.handCount} in hand · ${seat.libraryCount} in library`));
- for(const zone of ['Hand','Command','Battlefield','Graveyard','Exile']){if(!seat[zone])continue;panel.append(node('h3',zone));for(const c of seat[zone]){const n=node('div',`${c.name} #${c.id}${c.tapped?' · tapped':''}`);n.className='card';panel.append(n)}}el('seats').append(panel)}
- el('stack').textContent=(s.stack||[]).join('\n')||'Empty / no connected game';
- // A lost connection is not evidence there is no pending prompt or that a POST failed.
- if(connectionAvailable)renderDecision(s.prompt||null);
- else updateDecisionControls();
- }catch(e){
-  if(serial!==refreshSerial||revision!==deliveryRevision)return;
-  connectionAvailable=false;
-  el('status').textContent='Connection lost — decision status unchanged';
-  el('error').textContent='Cannot refresh Forge state. This does not mean a submitted decision failed.';
-  updateDecisionControls();
- }
+  try{
+    const [game,pod]=await Promise.all([api('/api/game'),api('/api/pod/status')]);renderPodStatus(pod);
+    if(Array.isArray(game.seats)||game.prompt||(game.error&&game.status!=='disconnected'))$('gamePanel').classList.remove('hidden');
+    if(Array.isArray(game.seats)){renderSeats(game);if(game.status==='finished')$('turnLabel').textContent='Game finished';}
+    if(game.error&&game.status!=='disconnected')$('podStatus').textContent=game.error;
+    if(game.prompt)renderPrompt(game.prompt);else {renderPrompt(null);if(game.status==='finished')$('turnLabel').textContent='Game finished'}
+    if(game.status==='disconnected'&&['running','starting'].includes(pod.status))$('podStatus').textContent='Waiting for Forge to start…';
+  }catch(e){$('podStatus').textContent='Waiting for the local game service…'}
 }
-async function send(id,choice){
- const state=currentPrompt;
- if(!state||state.id!==id||inFlight||!connectionAvailable||state.phase!=='ready')return;
- if(Array.isArray(choice)){
-  const min=state.prompt.min??0,max=state.prompt.max??state.optionButtons.size;
-  if(choice.length<min||choice.length>max||new Set(choice).size!==choice.length||choice.some(v=>!state.optionButtons.has(v)))return;
- }else if(!(state.prompt.choices||[]).includes(choice))return;
- // Retain the captured ID and ordered selection; never retry automatically.
- inFlight=true;state.phase='submitting';state.feedback='';deliveryRevision++;
- updateDecisionControls();
- try{
-  const response=await fetch('/api/game/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Array.isArray(choice)?{id,selected:[...choice]}:{id,choice})});
-  const result=await response.json();
-  if(response.ok&&result.status==='accepted'&&!result.error){
-   state.phase='accepted';
-  }else if(result.status==='disconnected'){
-   state.phase='uncertain';
-  }else if(result.status==='rejected'||response.status===409||response.status===400){
-   // Keep this ID locked until Forge publishes another prompt; rejection may be stale.
-   state.phase='rejected';state.feedback=result.error||'Server rejected this decision. Waiting for current Forge state; no automatic retry.';
-  }else{
-   state.phase='uncertain';
-  }
- }catch(e){state.phase='uncertain';}
- finally{
-  inFlight=false;deliveryRevision++;
-  updateDecisionControls();
- }
-}
-async function poll(){await refresh();setTimeout(poll,1500)}poll();
-</script></html>
+function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(async()=>{await refresh();schedulePoll()},1200)}
+refresh().finally(schedulePoll);
+</script>
+</body>
+</html>

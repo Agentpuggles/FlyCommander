@@ -1,86 +1,86 @@
-# Real paper Commander integration — implementation status
+# Commander table integration status
 
-The AI-assisted controller is a diagnostic prototype, not the requested game.
-Do not use its Forge-generated hand as the physical-hand design.
+## What exists
 
-## Verified upstream integration points (Forge tag forge-2.0.15)
+The `/play` page accepts a Commander list for the human and three AI seats. The
+Python parser checks list structure and writes Forge `.dck` files; Forge resolves
+card names and remains the sole rules engine. The default launcher creates a
+real browser-controlled `WebHumanController` at seat 0 and three stock Forge AI
+opponents. External Fly brains are optional, not a runtime dependency. The
+separate `--assisted-human` flag still selects a legacy AI-assisted controller.
 
-- `forge.player.PlayerControllerHuman` uses `IGuiGame`, synchronized inputs and
-  `forge.game.player.PlaySpellAbility`. Reuse these paths rather than inheriting
-  `PlayerControllerAi` for Flynn. The web adapter must implement input selection,
-  confirmation, ordering and payment interfaces, not return default answers.
-- `RemoteClientGuiGame`, `NetworkGuiGame`, and the upstream test
-  `HeadlessNetworkGuiGame` illustrate network GUI adaptation. Test no-op/default
-  decisions must NOT become production human choices.
-- `Player.doDraw` runs DrawCards/Draw replacement effects before selecting and
-  moving the library card; it then records draw history and triggers. It is
-  private and its callers are final: replacing only the lobby/controller cannot
-  override physical draws. A version-pinned source hook is necessary.
+The digital human adapter publishes a Forge snapshot and brokers Forge prompts.
+Forge-enumerated land, spell and ability choices return through Forge's normal
+controller path. The GUI proxy is partial and must fail closed when it reaches
+an unsupported Forge input. A real-Forge integration harness has been added to
+exercise land play, spell cast/resolution and combat damage through
+`WebHumanController`, with state-transition assertions. **It has not been
+compiled or run in this environment.**
 
-## Physical-zone requirements for that hook
+## What does not exist
 
-A paper draw acknowledgement must happen after Forge determines a draw actually
-occurs, before Forge moves its identified card and processes draw triggers. It
-must map to a remaining physical deck instance, never manufacture a card or
-teleport it from hand to battlefield. Known top/bottom order must be enforced.
-Replacement draws must not consume paper draws. Opening hands and each mulligan
-must use the same physical protocol. Library reveal, mill, search, scry, shuffle,
-and face-down cards also need explicit synchronization; a draw-only hook is not
-sufficient. Unknown identity is pending information, not a generic Forge card.
+The web pod currently runs a **digital Forge game from the submitted deck
+list**. Forge owns its virtual shuffle, hand, library, draws and zones. The
+player must use the browser's digital hand and decisions; this is not yet a
+physical deck gameplay experience. It must not be presented as synchronized to
+cards on the table.
 
-Public snapshots must use viewer-filtered card views; ad-hoc `getName()` loops
-are not sufficient for face-down exile and visibility-changing effects. Stop on
-unimplemented required decisions rather than delegating Flynn to the AI.
+Physical identity, paper library order, camera-based action recognition and
+physical action submission are not integrated with Forge. A scan identifies a
+card only: **SCAN != PLAY**. Scanning, table location changes and vision
+predictions cannot move a Forge card, play a land, cast a spell or change any
+game state. The camera UI is only a local preview. This is not yet the requested
+no-keyboard/no-fake-hand experience or a Spelltable/Convoke substitute.
 
-## This iteration
+## Required development sequence
 
-- Added FlyPod with three separate existing MushroomBody/DopamineSystem/
-  RewardComputer instances, independent episode records, random seeds and
-  checkpoint files. Brain panel excludes observations/card identities.
-- Added explicit per-controller brain URL support in Java (legacy default kept).
-- Fixed observer capability nesting to match the existing brain encoder.
-- These components are not yet wired into a playable four-player human game.
-- No scanner changes.
+1. Build and run a real Forge pod with a human seat plus three Forge AI seats;
+   verify multiple turns against the pinned Forge version.
+2. Compile and test the digital human controller against real Forge, beginning
+   with land play, spell cast/resolution and combat. Extend coverage to mana,
+   targets, modes, costs, abilities, priority, multiplayer and Commander prompts.
+   Forge must validate and execute every decision.
+3. Add identity mapping between physical card instances and Forge card IDs.
+4. Add physical action recognition/submission incrementally. An observation or
+   scan remains separate from the proposed action; Forge validates the action.
+5. Complete Commander decisions and interactions, then test full games.
 
-## Runtime blocker / acceptance gate
+No camera or vision work should precede a working digital Forge controller.
+Do not create a second rules engine: zones, legal actions, payment, stack,
+combat, triggers, Commander rules and outcomes remain Forge-owned.
 
-No Forge distribution or full JDK is available here. GitHub source API access
-works; release binary download and Maven TLS connections fail. jdk4py provided
-only a runtime, without javac. Java patch compilation has NOT been verified.
+## Physical synchronization requirements
 
-Next: provide/install Forge 2.0.15 + full compatible JDK, compile untouched
-upstream and patch, implement the source hook plus human web input adapter, then
-wire FlyPod and per-seat outcomes into match lifecycle. Preserve upstream license
-and attribution for copied/modified code.
+A version-pinned Forge hook will be required for draws and other library
+operations. A physical draw acknowledgement must happen only after Forge
+confirms that a draw actually occurs and before Forge moves that identified
+card and processes its triggers. Replacement draws must not consume a physical
+card. The protocol must cover opening hands, every mulligan, top/bottom order,
+search, reveal, mill, scry, shuffle and face-down information. It must never
+manufacture a card or teleport a physical identity between Forge zones. Unknown
+identity is pending information, not an interchangeable card.
 
-Acceptance requires the user's real-runtime sequence: four seats, actual paper
-opening hand, land, spell/payment, Fly turn, human response, stack/priority,
-combat, and real win/loss. Python tests are component checks only.
+## Runtime and test status
 
-## Pinned source checkout (subsequent update)
+The sandbox's pinned Forge source checkout is sparse and Java/Javac/Maven are
+unavailable. Earlier package-mirror and Maven Central attempts failed. No Java
+sources have been compiled and no Forge runtime has been launched here. Python
+parser/UI/lifecycle tests are infrastructure tests only; they do not prove
+Forge gameplay.
 
-Cloned `https://github.com/Card-Forge/forge.git` into ignored
-`data/forge-source-checkout`, detached at `forge-2.0.15`.
-Verified annotated tag object `b18e110a32462958aeda4b7fbac48c06399a2c23`
-and peeled commit `4ec5f1a2c32fa90ecb983a72b9eb47aa5c5d7676`.
-The unmodified checkout includes `forge-gui/res` (approximately 464 MB).
-The earlier missing-source/resource blocker is resolved.
-
-Reproducible build entry point:
+On a machine with JDK 17+, Maven and the pinned Forge resources:
 
 ```sh
-python scripts/build_forge_source.py --verify-only
-python scripts/build_forge_source.py
+git -C data/forge-source-checkout sparse-checkout disable
+python3 scripts/build_forge_source.py
+python3 -m pytest -q -s \
+  tests/test_forge_api_contract.py \
+  tests/test_forge_priority_pass.py \
+  tests/test_forge_web_human_integration.py
 ```
 
-The script checks tag, commit, tracked-source cleanliness and external resources;
-then invokes the desktop Maven reactor with dependencies, stages its runtime and
-resource link, and compiles FlyCommander using `javac --release 17`. Upstream
-Java tests are skipped by this build command and remain a separate gate. This
-build sequence is not yet validated beyond prerequisite checks.
-
-Actual attempt stopped before Maven: no full JDK or Maven installed/on PATH.
-The existing jdk4py runtime has no javac. Maven Central, Apache archive and
-OpenJDK binary-host probes still fail with TLS connection errors. Git clone
-works but does not supply the compiler or third-party Maven artifacts.
-No upstream modules or agent Java sources have been compiled; Forge has not run.
+The new integration pytest compiles the FlyCommander Java sources and runs a
+real Forge fixture when the built JAR and `res/` are present; otherwise it
+skips. A skipped test is not a pass. Only after those checks should the browser
+pod be exercised through multiple turns. Do not claim physical synchronization
+until the identity/action protocol and full-game tests exist.

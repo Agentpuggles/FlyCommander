@@ -7,9 +7,11 @@ wired into a patched [Forge](https://github.com/Card-Forge/forge) rules engine
 over HTTP, so the fly literally plays headless Commander games, loses with
 dignity, and gets better through a dopaminergic plasticity rule.
 
-It also plays on a **physical table** against you: real cards, a camera, and a
-hybrid vision + manual-correction state engine feeding the same brain
-(see [Physical-table mode](#physical-table-mode)).
+The project also includes a physical-table card scanner and an in-progress
+browser-controlled Forge Commander prototype (see [Commander pod prototype](#commander-pod-prototype)).
+The browser pod uses Forge's virtual deck and hand. Physical-card identity,
+physical library synchronization and camera-observed actions are not integrated
+into rules play.
 
 **Verified working:** a full pipeline where the untrained fly played complete
 multiplayer Commander games against Forge's AI (21–31 turns, 100–176 spiking
@@ -138,8 +140,9 @@ games; checkpoints land in `checkpoints/`, journals in `logs/`.
 
 ## Physical-table mode
 
-Play the fly with real cards. Forge remains the training environment; the
-physical table is a second environment feeding the **same** brain.
+Physical-table mode contains two separate tools: the card-scanner/state-mirror
+prototype below, and `/play`, the assisted Forge Commander pod described later.
+Scanner observations do not directly cast cards or change the pod's game state.
 
 ```bash
 make physical          # → http://127.0.0.1:8795
@@ -380,62 +383,67 @@ expensive recognition pass can never make the preview choppy or stale. The 🐞
 debug panel shows all three rates; if the preview is choppy while capture is
 at the device rate, the bottleneck is the encode, not the camera.
 
-### Commander pod: experimental assisted prototype
+### Commander pod prototype
 
-Open **`/play`** on the physical-table server for the new four-seat view.
-**Not yet verified against a running Forge installation. Not a complete manual
-paper Commander game.** The Python gateway/UI are tested; Java compilation and
-end-to-end game tests are still required.
+Open **`/play`** on the local table server. The default pod is a real Forge
+`WebHumanController` at seat 0 and three stock Forge AI opponents. It uses the
+submitted deck list as Forge's virtual deck. Fly-brain opponents are an optional
+launcher setting, not a default runtime dependency. The browser mediates Forge
+prompts; unsupported GUI/input paths fail closed.
 
-The table seat now waits for keep/mulligan, approval of AI-proposed plays, and
-pass-priority decisions. Stock Forge AI still selects targets, modes, X, mana,
-combat, discards, replacement effects and other micro decisions. Combat delegation
-requires acknowledgement. There is no arbitrary card/ability picker yet; an empty
-AI proposal does **not** mean there are no legal plays. Selectable fly opponents
-remain future work.
+This is the required **digital-controller development stage**, not the finished
+physical-table product. Forge supplies the shuffle, draws, library, hand and
+zones. No physical card instance is mapped to a Forge card ID, no physical
+library order is synchronized, and camera/scanner observations never submit a
+game action. **SCAN != PLAY.** The webcam is only a preview. The page states
+that the displayed Forge hand is digital; this is not a synchronized paper-hand
+workflow, keyboard-free physical game or Spelltable/Convoke substitute.
 
-Forge owns shuffle, draws and hand identity. Use a matching paper deck and retrieve
-the cards shown in your hand; do not shuffle/draw independently. Scanner imports
-are artwork references, not Forge game decks. Opponent hands/library identities
-are not included in human snapshots. Prompts use single-use IDs; disconnects do
-not auto-pass or spool game decisions. This is a local/trusted-user interface,
-not an authenticated multiplayer room: anyone with access can answer prompts.
+The Commander-list parser checks structure and size; Forge resolves card names
+and enforces all game rules. The parser is not a rules engine. The eventual
+physical layer must request actions from Forge and never edit Forge's zones,
+stack, mana, life, combat or outcomes itself.
+
+The new real-Forge integration harness,
+`tests/test_forge_web_human_integration.py`, is intended to exercise land play,
+spell cast/resolution and combat through the real WebHumanController and assert
+Forge state changes. It has **not** been compiled or run in this environment.
+The browser pod and full Commander completion are likewise not runtime
+verified.
 
 ```bash
-# Terminal 1: requires an extracted Forge 2.0.15 distribution and a full JDK
-python scripts/run_paper_game.py --forge-dir /path/to/forge \
-  --human-deck /path/to/your-deck.dck \
-  --ai-deck /path/to/opponent1.dck \
-  --ai-deck /path/to/opponent2.dck \
-  --ai-deck /path/to/opponent3.dck --experimental-assisted
-# Terminal 2: open /play on this server
+# If the pinned Forge checkout is sparse, materialize source/resources first.
+git -C data/forge-source-checkout sparse-checkout disable
+python3 scripts/build_forge_source.py
+python3 -m pytest -q -s tests/test_forge_web_human_integration.py
 .venv/bin/python scripts/physical_table.py --no-camera --port 8795
+# Open http://localhost:8795/play
 ```
 
-Launcher compiles before starting and fails on missing prerequisites. Set
-`FLYCOMMANDER_AGENT_URL` on the Python server for a non-default agent URL.
-The browser uses same-origin `/api/game` and `/api/game/decision` routes.
+Use JDK 17+, Maven and the pinned Forge 2.0.15 resources. The pytest harness
+skips without a real Forge JAR and `res/`; a skip is not a pass. This sandbox
+has no Java/Javac/Maven and the source checkout is sparse, so no Java compile or
+Forge game has been run here. See
+[docs/paper-game-integration.md](docs/paper-game-integration.md) for the
+required milestones and physical-synchronization constraints.
 
 **Correction to the old mirror documentation:** direct `moveTo`, `setTapped`,
 `addCounter`, and `setLife` calls are state edits, not legal casting/cost payment.
-The agent now rejects `/table/events` and `/table/state` with HTTP 410. Legacy
-Python mirror code remains for compatibility tests, but cannot change this game.
-A scanner confirmation only records identity in the scanner workspace.
+The agent rejects `/table/events` and `/table/state` with HTTP 410. Legacy Python
+mirror code remains for compatibility, but cannot change this game.
 
-Architecture (all under [physical/](physical/)):
+The following scanner/observer material describes a standalone diagnostic
+pipeline only. It is **not connected to the Forge game** and does not decide
+rules, simulate the authoritative match, or submit actions. `PhysicalGameState`
+and its event annotations must not be treated as a second rules engine or as
+Forge state. The only rules authority for gameplay is Forge.
+
+Legacy diagnostic architecture (all under [physical/](physical/)):
 
 ```
-server-owned camera (V4L2, MJPG 1920x1080@30, verified negotiation)
-   → single capture loop (one V4L2 owner): native-rate read (~24 FPS),
-     analysis decoupled at 5 Hz, preview encode at 10 Hz
-   → every frame, no OCR: analyze_frame()
-       presence → geometry → quality → perspective correction → (OCR on Scan)
-   → CardTracker (stable IDs, IoU matching, occlusion grace, tap hysteresis)
-   → PhysicalObserver → candidate events
-   → Engine (reconciliation: vision proposes, rules + player dispose)
-   → PhysicalGameState (authoritative, public-only)
-   → to_fly_observation() → existing sensory encoder → mushroom body
-   → fly decision → spectator UI (fly board, brain panel, event log)
+local camera/scan observer → candidate identity/location observations
+   → optional diagnostic tracking and annotations (not Forge game state)
+   → no action or state mutation reaches Forge
 ```
 
 - **Registration (success-first, multi-signal)** — hit *Scan card*: the
@@ -545,22 +553,14 @@ server-owned camera (V4L2, MJPG 1920x1080@30, verified negotiation)
 - **Tracking** — cards keep stable tracking IDs through movement and brief
   occlusion (configurable grace period). Tap detection: smoothed orientation
   within a configurable tolerance of 90°, settled over consecutive frames.
-- **Hybrid state** — vision taps/untaps automatically; zone changes, combat
-  and damage require player confirmation (✓/✗ in the UI). Counters, buffs,
-  abilities, life and tokens are one-click annotations on any card.
-- **Summoning sickness** — rules-derived from `turns_started` per controller
-  (never inferred from pixels); `haste` exempts; correctable.
-- **Hidden information** — hands/libraries are counts only; the fly receives
-  state exclusively through `to_fly_observation()`; the UI never shows the
-  fly's hand.
+- **Legacy annotation UI (diagnostic only)** — it can display proposed tap
+  observations or local annotations. None of these values submit actions to
+  Forge or update a Forge match.
+- **Legacy private-zone view** — the standalone observer can hide hand/library
+  identities in its own display. Forge's actual game view and browser adapter
+  are separate and must continue to use viewer-filtered data.
 
-Verified working: 173-test suite green under the project `.venv`
-(OpenCV 5.0 + Tesseract 5.5) — including camera configuration, the
-perspective-tolerant scan pipeline (synthetic keystone scenes: 30°/45°
-cards detected and rectified, never rejected), artwork-similarity matching,
-and crash-proof watcher/detection handoffs; the full suite also passes
-under a cv2-free Python (vision tests skip, nothing crashes). Camera
-negotiation, single-owner capture and the state pipeline are unit-tested
-with synthetic frames; real-card behavior under your exact lighting is
-tuned via the 🐞 debug view. Without OpenCV/Tesseract, manual registration
-still works.
+Verified working: Python observer/UI tests cover the diagnostic pipeline under
+its test fixtures. They are not Forge gameplay or physical synchronization tests.
+The previous report that the 173-test suite was green is historical, not
+verification of the current Forge human controller.

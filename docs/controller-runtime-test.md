@@ -1,84 +1,56 @@
-# First controller/runtime handshake — not paper gameplay
+# WebHumanController integration harness
 
-The user verified the previous API-correction commit compiles with the exact
-Forge 2.0.15 reactor, and its real-JAR contract test passes. This new controller
-handshake change still needs local compilation and runtime testing.
+The default browser pod now uses a real `WebHumanController` for seat 0 and
+stock Forge AI for seats 1–3. `--controller-test` remains an optional
+runtime/diagnostic mode; it is not a physical library or card synchronization
+mode. External Fly AI opponents are opt-in, not a default dependency.
 
-The existing launcher now accepts `--controller-test` and `--runtime-dir`.
-Without --controller-test, the physical-library gate remains. With it, Forge
-may deal DIGITAL test hands and call the human controller's real callbacks:
-chooseStartingPlayer, mulliganKeepHand, tuckCardsViaMulligan and
-chooseSpellAbilityToPlay. Each waits on DecisionBroker. Priority currently offers
-only explicit Pass; it does not assert there are no other legal actions.
-No AI fallback, automatic pass, physical hand synchronization or casting claim.
+The new `forge_patch/tests/fly/agent/WebHumanGameIntegrationTest.java` is a
+real-Forge controlled-state harness. A background test script submits actual
+`DecisionBroker` option IDs to the human controller. It exercises Forge's
+normal land-play path, observes a spell on the Forge stack before passing,
+asserts the spell resolves to the battlefield, then declares an attacker through
+Forge's `InputAttack`/`InputProxy` callback and asserts the defending player's
+life changes through Forge combat damage. It does not directly mutate those
+outcomes. The fixture setup is controlled, so this is not yet a full match or a
+physical-game test.
 
-`awaitNextInput` and `cancelAwaitNextInput` are waiting-indicator callbacks, not
-choices, and do not block. Other unsupported human input paths still fail closed.
-Match.startGame failures publish a fault and retain HTTP service for inspection.
+## Run against the pinned runtime
 
-## Arch/CachyOS commands
-
-From the FlyCommander repository root:
+Requirements: JDK 17+, the pinned Forge 2.0.15 source/resources and Maven.
+From the repository root:
 
 ```bash
-git pull --ff-only origin arena/01a0f6d4-flycommander
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
-export PATH="$JAVA_HOME/bin:$PATH"
+git -C data/forge-source-checkout sparse-checkout disable
 python3 scripts/build_forge_source.py
-mkdir -p logs
-set -o pipefail
-.venv/bin/python -u scripts/run_physical_pod.py \
-  --controller-test \
-  --runtime-dir '/home/flynn/Projects/Magic Fly/data/forge-built-runtime' \
-  --human-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck \
-  --fly-deck tests/fixtures/controller-test.dck \
-  2>&1 | tee logs/controller-runtime-test.log
+python3 -m pytest -q -s tests/test_forge_web_human_integration.py
 ```
 
-The fixture is a real-card Commander test deck (Isamaru + 99 Plains), intentionally
-limited to reduce unrelated choices. Each Fly remains a separate controller and
-brain, even when using the same deck. Fresh test brains avoid modifying saved
-paper-session checkpoints. Forge is still responsible for starting-player logic.
+The pytest harness compiles all FlyCommander Java sources against the real
+Forge JAR and runs the integration class with Forge's external `res/` directory.
+It skips if the JDK, built JAR or resources are missing; a skip is not a pass.
 
-Separate terminal:
+The adjacent regressions are separate:
 
 ```bash
-.venv/bin/python scripts/physical_table.py --no-camera --port 8795
+python3 -m pytest -q -s \
+  tests/test_forge_api_contract.py \
+  tests/test_forge_priority_pass.py \
+  tests/test_java_decision_broker.py
 ```
 
-Open http://localhost:8795/play. If offered, select the starting player and
-Confirm selection; keep/mulligan the digital hand, then explicitly pass when
-Forge asks for priority. A request stays pending until the HTTP response arrives.
-The same-origin API is GET /api/game and POST /api/game/decision with
-`{id,selected:[optionId]}`.
+For the live browser pod, build first, then launch the local game server and
+open `/play`. The default launch uses a Forge digital deck/hand, the new human
+controller, and three Forge AI opponents. The physical camera is a preview;
+physical card identity, physical library order and camera action submission are
+not installed. Do not treat the controller harness as evidence of a complete
+Commander game or the requested keyboard-free physical experience.
 
-## Evidence to collect
+## Local sandbox status
 
-Actual logs now include initialization returned, each created seat/controller,
-per-Fly HTTP /stats health response, Calling Match.startGame, human callback,
-broker pending UUID, accepted UUID, and response returned to Forge. A /stats
-connection is NOT a Fly decision. Later brain /stats decisionsServed increments
-are needed to show real observation/decision calls. No synthetic decision probe
-is sent to the learners. A human callback is evidence Forge reached that stage;
-Calling Match.startGame alone is not evidence of a started game.
-
-Please return logs/controller-runtime-test.log and the /api/game response if it
-stops. UI screenshots alone cannot establish that Forge consumed a response.
-
-## Sandbox attempt
-
-Used the command above (without tee) with the supplied /home/flynn runtime path.
-Actual output:
-
-```
-usage: run_physical_pod.py [-h] [--controller-test]
-                           [--runtime-dir RUNTIME_DIR] --human-deck HUMAN_DECK
-                           --fly-deck FLY_DECK
-run_physical_pod.py: error: Build first: python scripts/build_forge_source.py
-```
-
-That path is on the user's machine, not this sandbox. No JVM was launched, no
-seats created, and no broker request observed here. This is a preflight failure,
-not a real Forge boot attempt. Runtime acceptance is pending local execution.
+This sandbox has a sparse pinned Forge checkout and no `java`, `javac` or Maven
+on PATH. Attempts to install the JDK/Maven and reach Maven Central failed due to
+network/mirror errors. Consequently neither the new integration test nor the
+updated adapter has been compiled or run here. The source and runnable harness
+are in the repository, but runtime acceptance is still pending on a machine
+with the pinned Forge build prerequisites.
