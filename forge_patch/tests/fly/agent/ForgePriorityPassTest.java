@@ -44,15 +44,24 @@ public final class ForgePriorityPassTest {
 
     public static void main(String[] args) {
         // Explicit exit also terminates Forge's desktop/background threads.
-        try { run(); System.exit(0); }
-        catch (Throwable failure) { failure.printStackTrace(); System.exit(1); }
+        try {
+            if (args.length != 1) {
+                throw new IllegalArgumentException("Usage: ForgePriorityPassTest <deck-spec>");
+            }
+            run(args[0]);
+            System.exit(0);
+        }
+        catch (Throwable failure) {
+            failure.printStackTrace();
+            System.exit(1);
+        }
     }
 
-    private static void run() throws Exception {
+    private static void run(String deckSpec) throws Exception {
         System.setProperty("fly.agent.controllerTest", "true");
         GuiBase.setInterface(new GuiDesktop());
         FModel.initialize(null, null);
-        Deck deck = DeckResolver.resolve(args[0]);
+        Deck deck = DeckResolver.resolve(deckSpec);
         List<RegisteredPlayer> seats = new ArrayList<>();
         RegisteredPlayer humanSeat = RegisteredPlayer.forCommander(deck);
         humanSeat.setPlayer(new WebHumanLobbyPlayer("Flynn"));
