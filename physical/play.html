@@ -2,40 +2,161 @@
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>FlyCommander · Commander pod</title>
 <style>
-:root{color-scheme:dark}body{margin:0;background:#12141a;color:#e8ecf4;font:15px/1.5 system-ui}main{max-width:1200px;margin:auto;padding:24px}h1{margin:0}a{color:#7fd4ff}.notice,section{border:1px solid #3d4659;border-radius:10px;padding:18px;margin:16px 0;background:#1b1f2a}.notice{border-color:#c7a65a}#seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}#seats section{margin:0}button{padding:12px;margin:8px 8px 0 0;background:#285a47;color:white;border:1px solid #6aaf89;border-radius:6px;cursor:pointer}button:disabled{opacity:.4}pre{white-space:pre-wrap;font:inherit}small{color:#abb7cb}.card{padding:5px 0;border-bottom:1px solid #343c4a}h3{margin-bottom:4px}#error{color:#ffb1a4}
+:root{color-scheme:dark}body{margin:0;background:#12141a;color:#e8ecf4;font:15px/1.5 system-ui}main{max-width:1200px;margin:auto;padding:24px}h1{margin:0}a{color:#7fd4ff}.notice,section{border:1px solid #3d4659;border-radius:10px;padding:18px;margin:16px 0;background:#1b1f2a}.notice{border-color:#c7a65a}#seats{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}#seats section{margin:0}button{padding:12px;margin:8px 8px 0 0;background:#285a47;color:white;border:1px solid #6aaf89;border-radius:6px;cursor:pointer}button:disabled{opacity:.4}pre{white-space:pre-wrap;font:inherit}small{color:#abb7cb}.card{padding:5px 0;border-bottom:1px solid #343c4a}h3{margin-bottom:4px}#error{color:#ffb1a4}#decisionState{min-height:1.5em;color:#ffd479;font-weight:600}
 </style><main>
 <header><small>FLYCOMMANDER / FOUR-SEAT COMMANDER</small><h1>Your paper table, a digital rules engine</h1><a href="/">Open scanner workspace</a></header>
 <div id="testMode" class="notice" hidden>CONTROLLER TEST — Forge-generated digital hand. NOT physical paper gameplay. Human priority controls currently support explicit pass only.</div>
-<div class="notice"><b>Experimental assisted prototype — not yet runtime-verified</b><p>You approve AI-proposed plays, keep/mulligan and pass priority. Forge AI still selects targets, mana, modes, X, combat, discards and other effect choices. This is not yet the full manual paper game.</p><p>Forge controls the shuffle and draws. Use a matching paper deck and retrieve the hand shown here. Do not draw independently. Scanning records identity only; it never casts a spell or changes this game.</p></div>
-<section><h2 id="status">Checking connection…</h2><p id="error" role="alert"></p><div id="setup"><p>Requires an installed Forge 2.0.15 distribution and a JDK. The launcher compiles the patch before starting; it fails rather than falling back to a fake game.</p><pre>python scripts/run_paper_game.py --forge-dir /path/to/forge \
-  --human-deck /path/to/your-deck.dck \
-  --ai-deck /path/to/opponent1.dck \
-  --ai-deck /path/to/opponent2.dck \
-  --ai-deck /path/to/opponent3.dck \
-  --experimental-assisted</pre><small>The scanner deck import is separate from Forge's .dck game deck. Fly opponent selection and manual action/target controls are not implemented yet.</small></div></section>
-<section id="decision" hidden><h2 id="kind"></h2><pre id="message"></pre><div id="choices"></div></section>
+<div class="notice"><b>Controller-test digital-hand prototype — handshake and priority regression runtime-verified</b><p>The real Forge 2.0.15 controller handshake and priority-pass regression have been verified locally. Human keep/mulligan and explicit pass responses go to Forge; casting, targeting, mana and combat controls remain incomplete. This is not a complete paper Commander game.</p><p>Controller tests use Forge-generated digital hands, not your physical hand. Physical deck/hand synchronization is not implemented. Scanning records identity only; it never casts a spell or changes this game.</p></div>
+<section><h2 id="status">Checking connection…</h2><p id="error" role="alert"></p><div id="setup"><p>Build the agent against the pinned Forge 2.0.15 source with Java 17, then start the explicit controller test. Three independent Fly brains are started by the launcher.</p><pre>python3 scripts/build_forge_source.py
+.venv/bin/python scripts/run_physical_pod.py --controller-test \
+  --human-deck tests/fixtures/controller-test.dck \
+  --fly-deck tests/fixtures/controller-test.dck \
+  --fly-deck tests/fixtures/controller-test.dck \
+  --fly-deck tests/fixtures/controller-test.dck</pre><small>This command tests digital-hand controller transport, not paper gameplay. Keep this page open to answer Forge's pending requests.</small></div></section>
+<section id="decision" hidden><h2 id="kind"></h2><pre id="message"></pre><p id="decisionState" role="status" aria-live="polite"></p><div id="choices"></div></section>
 <div id="seats"></div><section><h2>Stack</h2><pre id="stack">No connected game</pre></section>
 </main><script>
-let sending=false;
+// Selection and delivery state belong to a prompt ID, not to transient DOM nodes.
+let currentPrompt=null;
+let inFlight=false;
+let connectionAvailable=false;
+let refreshSerial=0;
+let deliveryRevision=0;
 const el=id=>document.getElementById(id);
 function node(tag,text){const n=document.createElement(tag);n.textContent=text;return n}
+function decisionKey(prompt){
+ return JSON.stringify([prompt.options||[],prompt.choices||[],prompt.min,prompt.max]);
+}
+function updateDecisionControls(){
+ if(!currentPrompt)return;
+ const state=currentPrompt;
+ const locked=inFlight||!connectionAvailable||state.phase!=='ready';
+ for(const [id,button] of state.optionButtons){
+  const selected=state.selected.includes(id);
+  button.style.outline=selected?'2px solid gold':'';
+  button.setAttribute('aria-pressed',String(selected));
+  button.disabled=locked;
+ }
+ for(const button of state.choiceButtons)button.disabled=locked;
+ if(state.submit){
+  const min=state.prompt.min??0;
+  const max=state.prompt.max??state.optionButtons.size;
+  state.submit.disabled=locked||state.selected.length<min||state.selected.length>max;
+  state.submit.textContent=state.phase==='submitting'?'Submitting…':state.phase==='accepted'?'Accepted':'Confirm selection';
+ }
+ let text=state.feedback;
+ if(state.phase==='submitting')text='Submitting… Waiting for the server acknowledgement.';
+ else if(state.phase==='accepted')text='Accepted — waiting for Forge’s next prompt. This decision will not be sent again.';
+ else if(state.phase==='uncertain')text='Submission status unknown. The connection failed; this does not mean Forge rejected the decision. Waiting for refreshed state; do not resend this prompt.';
+ else if(!text)text=state.selected.length?'Selection saved. Click Confirm selection to send it to Forge.':'Choose an option, then confirm your selection.';
+ if(!connectionAvailable)text+=' Connection unavailable; selection and delivery state have been preserved.';
+ el('decisionState').textContent=text;
+}
+function renderDecision(prompt){
+ if(!prompt){
+  currentPrompt=null;
+  el('decision').hidden=true;
+  el('choices').replaceChildren();
+  el('decisionState').textContent='';
+  return;
+ }
+ el('decision').hidden=false;
+ if(!currentPrompt||currentPrompt.id!==prompt.id){
+  currentPrompt={id:prompt.id,prompt,selected:[],phase:'ready',feedback:'',key:null,
+   optionButtons:new Map(),choiceButtons:[],submit:null};
+ }
+ const state=currentPrompt;
+ state.prompt=prompt;
+ el('kind').textContent=prompt.kind;
+ el('message').textContent=prompt.message;
+ const key=decisionKey(prompt);
+ // Polling identical options must not discard focus, highlights or submit state.
+ if(state.key!==key){
+  state.key=key;
+  el('choices').replaceChildren();
+  state.optionButtons=new Map();state.choiceButtons=[];state.submit=null;
+  const allowed=new Set((prompt.options||[]).map(option=>option.id));
+  if(state.phase==='ready')state.selected=state.selected.filter(id=>allowed.has(id));
+  for(const option of prompt.options||[]){
+   const button=node('button',option.label);
+   button.onclick=()=>{
+    if(currentPrompt!==state||inFlight||!connectionAvailable||state.phase!=='ready')return;
+    const index=state.selected.indexOf(option.id);
+    if(index>=0)state.selected.splice(index,1);else state.selected.push(option.id);
+    state.feedback='';updateDecisionControls();
+   };
+   state.optionButtons.set(option.id,button);el('choices').append(button);
+  }
+  if(prompt.options){
+   state.submit=node('button','Confirm selection');
+   state.submit.onclick=()=>send(state.id,[...state.selected]);
+   el('choices').append(state.submit);
+  }
+  for(const choice of prompt.choices||[]){
+   const button=node('button',choice);
+   button.onclick=()=>send(state.id,choice);
+   state.choiceButtons.push(button);el('choices').append(button);
+  }
+ }
+ updateDecisionControls();
+}
 async function refresh(){
+ const serial=++refreshSerial;
+ const revision=deliveryRevision;
  try{
- const s=await(await fetch('/api/game')).json();
+ const response=await fetch('/api/game');
+ if(!response.ok)throw new Error('State request failed');
+ const s=await response.json();
+ // A GET started before a POST acknowledgement cannot undo delivery feedback.
+ if(serial!==refreshSerial||revision!==deliveryRevision)return;
+ connectionAvailable=s.status!=='disconnected'&&s.status!=='rejected'&&!s.error;
  el('testMode').hidden=s.mode!=='controller-test-digital-hand';
- el('status').textContent=s.status==='awaiting_decision'?(s.prompt?.kind==='priority'?'YOUR PRIORITY':'Your Forge decision'):s.status==='disconnected'?'Scanner only — no game connected':`Game: ${s.status}`;
- el('setup').hidden=Array.isArray(s.seats);
+ el('status').textContent=s.status==='awaiting_decision'?(s.prompt?.kind==='priority'?'YOUR PRIORITY':'Your Forge decision'):s.status==='disconnected'?'No game connection — decision state preserved':`Game: ${s.status}`;
+ el('setup').hidden=(connectionAvailable&&s.mode==='controller-test-digital-hand')||Array.isArray(s.seats);
  el('error').textContent=s.error||'';
  el('seats').replaceChildren();
  for(const seat of s.seats||[]){const panel=node('section','');panel.append(node('h2',seat.name),node('p',`${seat.life} life · ${seat.handCount} in hand · ${seat.libraryCount} in library`));
  for(const zone of ['Hand','Command','Battlefield','Graveyard','Exile']){if(!seat[zone])continue;panel.append(node('h3',zone));for(const c of seat[zone]){const n=node('div',`${c.name} #${c.id}${c.tapped?' · tapped':''}`);n.className='card';panel.append(n)}}el('seats').append(panel)}
  el('stack').textContent=(s.stack||[]).join('\n')||'Empty / no connected game';
- el('decision').hidden=!s.prompt;el('choices').replaceChildren();
- if(s.prompt?.options){const selected=[];for(const option of s.prompt.options){const b=node('button',option.label);b.onclick=()=>{const i=selected.indexOf(option.id);if(i>=0){selected.splice(i,1);b.style.outline=''}else{selected.push(option.id);b.style.outline='2px solid gold'}};el('choices').append(b)}const submit=node('button','Confirm selection');submit.onclick=()=>send(s.prompt.id,selected);el('choices').append(submit)}
- if(s.prompt){el('kind').textContent=s.prompt.kind;el('message').textContent=s.prompt.message;for(const choice of s.prompt.choices||[]){const b=node('button',choice);b.disabled=sending;b.onclick=()=>send(s.prompt.id,choice);el('choices').append(b)}}
- }catch(e){el('status').textContent='Connection lost — no action queued';el('decision').hidden=true;el('seats').replaceChildren()}
+ // A lost connection is not evidence there is no pending prompt or that a POST failed.
+ if(connectionAvailable)renderDecision(s.prompt||null);
+ else updateDecisionControls();
+ }catch(e){
+  if(serial!==refreshSerial||revision!==deliveryRevision)return;
+  connectionAvailable=false;
+  el('status').textContent='Connection lost — decision status unchanged';
+  el('error').textContent='Cannot refresh Forge state. This does not mean a submitted decision failed.';
+  updateDecisionControls();
+ }
 }
-async function send(id,choice){if(sending)return;sending=true;for(const b of el('choices').children)b.disabled=true;
- try{const r=await(await fetch('/api/game/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Array.isArray(choice)?{id,selected:choice}:{id,choice})})).json();if(r.error)alert(r.error)}catch(e){alert('Connection lost. Refresh state before retrying; do not assume the action failed.')}finally{sending=false;await refresh()}}
+async function send(id,choice){
+ const state=currentPrompt;
+ if(!state||state.id!==id||inFlight||!connectionAvailable||state.phase!=='ready')return;
+ if(Array.isArray(choice)){
+  const min=state.prompt.min??0,max=state.prompt.max??state.optionButtons.size;
+  if(choice.length<min||choice.length>max||new Set(choice).size!==choice.length||choice.some(v=>!state.optionButtons.has(v)))return;
+ }else if(!(state.prompt.choices||[]).includes(choice))return;
+ // Retain the captured ID and ordered selection; never retry automatically.
+ inFlight=true;state.phase='submitting';state.feedback='';deliveryRevision++;
+ updateDecisionControls();
+ try{
+  const response=await fetch('/api/game/decision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Array.isArray(choice)?{id,selected:[...choice]}:{id,choice})});
+  const result=await response.json();
+  if(response.ok&&result.status==='accepted'&&!result.error){
+   state.phase='accepted';
+  }else if(result.status==='disconnected'){
+   state.phase='uncertain';
+  }else if(result.status==='rejected'||response.status===409||response.status===400){
+   // Keep this ID locked until Forge publishes another prompt; rejection may be stale.
+   state.phase='rejected';state.feedback=result.error||'Server rejected this decision. Waiting for current Forge state; no automatic retry.';
+  }else{
+   state.phase='uncertain';
+  }
+ }catch(e){state.phase='uncertain';}
+ finally{
+  inFlight=false;deliveryRevision++;
+  updateDecisionControls();
+ }
+}
 async function poll(){await refresh();setTimeout(poll,1500)}poll();
 </script></html>
