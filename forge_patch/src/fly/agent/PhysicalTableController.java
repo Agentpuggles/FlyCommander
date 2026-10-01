@@ -40,7 +40,8 @@ public class PhysicalTableController extends PlayerControllerAi {
         }
         List<String> choices = proposed.isEmpty() ? List.of("Pass priority") : List.of("Approve AI proposal", "Pass priority");
         String choice = ask("priority", proposed.isEmpty() ? "No AI-proposed play. This does not mean no legal plays exist." : preview.toString(), choices);
-        return choice.equals("Approve AI proposal") ? proposed : List.of();
+        // A null result is Forge's priority-pass sentinel; [] retries the seat.
+        return choice.equals("Approve AI proposal") && !proposed.isEmpty() ? proposed : null;
     }
     @Override public void declareAttackers(Player attacker, Combat combat) {
         ask("combat", "Forge AI will choose your attackers and defenders, including mandatory attacks. Manual combat is not implemented.", List.of("Delegate attacks to AI"));

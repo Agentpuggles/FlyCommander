@@ -74,7 +74,10 @@ public final class WebHumanController extends PlayerControllerHuman {
                 + " / stack size " + getGame().getStack().size()
                 + "\nHandshake scope: explicit pass only. Casting/activation controls are not implemented here.",
                 List.of(new DecisionBroker.Option("pass", "Pass priority")), 1, 1);
-        return List.of();
+        // Forge 2.0.15 PhaseHandler.mainLoopStep: null breaks the action loop
+        // as "I pass". InputPassPriority.getChosenSa() likewise remains null
+        // after a real human pass. An empty list would re-prompt this same seat.
+        return null;
     }
     // These are waiting indicators, not decisions; Forge calls them for players
     // who are waiting while another player selects the starting player.

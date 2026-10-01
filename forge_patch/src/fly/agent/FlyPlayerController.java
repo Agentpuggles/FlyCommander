@@ -55,6 +55,8 @@ public class FlyPlayerController extends PlayerControllerAi {
      */
     @Override
     public java.util.List<SpellAbility> chooseSpellAbilityToPlay() {
+        // Forge 2.0.15 uses null for pass, NOT an empty ability list. Returning
+        // [] would keep this AI in PhaseHandler's action loop until its limit.
         // Gate: the brain only decides on the fly's own main phases. Everything
         // else (instants on others' turns, triggers, combat priority) passes
         // through instantly — a documented v1 limitation.
@@ -67,7 +69,7 @@ public class FlyPlayerController extends PlayerControllerAi {
         }
         if (!myMain || decisionsThisPhase >= MAX_DECISIONS_PER_PHASE
                 || getGame().isGameOver()) {
-            return java.util.List.of();
+            return null;
         }
         decisionsThisPhase++;
 
@@ -88,7 +90,7 @@ public class FlyPlayerController extends PlayerControllerAi {
                     return java.util.List.of(best);
                 }
                 AgentServer.recordAction("play:none");
-                return java.util.List.of(); // nothing worth playing → hold
+                return null; // nothing worth playing → hold
             }
             case ACT_INTERACT: {
                 SpellAbility sa = pickBestSa(true);
@@ -97,16 +99,16 @@ public class FlyPlayerController extends PlayerControllerAi {
                     return java.util.List.of(sa);
                 }
                 AgentServer.recordAction("interact:none");
-                return java.util.List.of();
+                return null;
             }
             case ACT_ATTACK:
                 // handled in declareAttackers(); pass priority for now
                 AgentServer.recordAction("attack:deferred");
-                return java.util.List.of();
+                return null;
             case ACT_HOLD:
             default:
                 AgentServer.recordAction("hold");
-                return java.util.List.of();
+                return null;
         }
     }
 
