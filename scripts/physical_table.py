@@ -25,6 +25,17 @@ def main() -> int:
                     help="fly brain checkpoint from Forge training")
     ap.add_argument("--offline", action="store_true",
                     help="never contact Scryfall (cache/manual only)")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="bind address (default 0.0.0.0 so a tablet/phone on "
+                         "the network can open the table)")
+    ap.add_argument("--build-index", type=int, default=0, metavar="N",
+                    help="build the recognition index from N synthetic cards "
+                         "(use with --sync-scryfall for real cards)")
+    ap.add_argument("--sync-scryfall", action="store_true",
+                    help="download Scryfall bulk card data and build the "
+                         "recognition index from real card images")
+    ap.add_argument("--images", type=int, default=0, metavar="N",
+                    help="download at most N card images while building")
     ap.add_argument("--camera-config", default=None,
                     help="path to camera_config.json "
                          "(default: physical/camera_config.json or repo root)")
@@ -43,15 +54,33 @@ def main() -> int:
     if args.offline:
         app.cache.allow_network = False
 
-    server = PhysicalTableServer(app, port=args.port)
+    if args.build_index or args.sync_scryfall:
+        info = app.vision_build_index(synthetic=args.build_index,
+                                      sync_scryfall=args.sync_scryfall,
+                                      download_images=args.images)
+        print(f"[vision] index ready: {info['cards']} entries, embedder "
+              f"{info['embedder']} (dim {info['dim']})")
+        for note in info.get("notes", []):
+            print(f"[vision] {note}")
+
+    server = PhysicalTableServer(app, port=args.port, host=args.host)
     server.start()
     if app.watcher.start():
-        print("[physical] camera watcher running (tap/presence tracking, no OCR)")
+        print("[physical] camera watcher running")
     else:
         print("[physical] camera watcher unavailable:", app.watcher.stats["lastError"])
+    status = app.recognizer.status()
+    if status["ready"]:
+        print(f"[vision] neural recognition active — {status['indexSize']} cards "
+              f"indexed, detector={status['detector']}, "
+              f"embedder={status['embedder']['name']}")
+    else:
+        print("[vision] no recognition index yet — run with --build-index 64 "
+              "(demo library) or --sync-scryfall (real cards); the OCR path "
+              "stays available in the meantime")
     print(f"[physical] Magic Fly table running:  http://127.0.0.1:{args.port}")
     print("[physical] allow the browser camera when prompted (mtgscan-style")
-    print("[physical] getUserMedia). Register cards via OCR or set+number;")
+    print("[physical] getUserMedia). Cards are recognised automatically;")
     print("[physical] the fly brain panel updates with every decision.")
     try:
         while True:

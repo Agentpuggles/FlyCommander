@@ -21,7 +21,16 @@ from vision.card_analysis import (                    # noqa: E402
 
 
 @pytest.fixture()
-def app(tmp_path):
+def app(tmp_path, monkeypatch):
+    """App with the OCR-era scan path force-enabled.
+
+    These tests pin the scan-state contract of `scan_frames` (analysis state →
+    UI status/message). The neural path takes over whenever a recognition
+    index exists; here there is none, so the legacy path is exercised — and it
+    is enabled explicitly because Tesseract is optional and often absent (the
+    analysis stage itself is monkeypatched in every test below).
+    """
+    monkeypatch.setattr("physical.server.SCAN_AVAILABLE", True)
     return PhysicalTableApp(data_dir=tmp_path, allow_network=False)
 
 
