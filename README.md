@@ -253,6 +253,29 @@ thousands of cards, not 300. Treat the table as a **co-pilot that is right most
 of the time and admits when it is not**, not as a barcode scanner — the UI
 always shows the ranked candidates and offers one-tap confirmation.
 
+> **Reproducing them (measured 2026-10-01).** The table above is the
+> *trained*-embedder result, and `scripts/train_embedder.py` needs `torch`
+> (not installed by default). Out of the box — no weights, `dense` descriptor,
+> exactly the command above (`--cards 300 --scenes 40 --per-condition 40
+> --calibrate`, seed 5) — this repo currently measures:
+>
+> | Stage | Claimed (trained) | Measured (untrained, fresh clone) |
+> | --- | --- | --- |
+> | Recognition top-1 | 54.3 % | **30.0 %** (clean 42.5 %, foil 17.5 %, glare 20.0 %) |
+> | End-to-end top-1 | 60 % | **50.0 %** |
+> | End-to-end wrong-card rate | “unknown instead of a wrong card” | **29.2 %** ⚠️ |
+> | Detection recall / corner error | ~0.95 / ≈20 px | **0.61 / 27.3 px** |
+> | Detection latency | ≈155 ms/frame | **≈208 ms/frame** |
+>
+> Two things follow. First, **training is not optional** if you want the
+> published numbers. Second, with an untrained embedder the pipeline answers
+> the *wrong card* on ~29 % of scenes instead of saying “unknown”, which
+> contradicts the design rule above: until `train_embedder.py` has run, treat
+> recognition as “OCR + Scryfall, confirmed by you” and raise
+> `auto_accept_confidence` if you want it to stop auto-registering. This is
+> the gap tracked as open question #13 in
+> [research/open_questions](research/open_questions/open_questions.md).
+
 Building the index:
 
 ```bash

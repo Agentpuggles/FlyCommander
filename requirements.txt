@@ -2,8 +2,20 @@
 numpy>=1.26
 pytest>=8.0
 
-# Optional / future layers
-# ultralytics>=8.2      # YOLOv8 card detector training (vision/)
-# opencv-python>=4.9    # perception, ArUco zones, dewarp (vision/)
-# torch>=2.2            # CLIP/DINOv2 card embeddings (vision/)
-# brian2>=2.5           # alternative spiking simulator backend
+# ---------------------------------------------------------------------------
+# Physical-table mode (`make physical`) additionally needs OpenCV and
+# Tesseract. Without them the table still runs (state, events, brain, Forge
+# bridge) but the camera never opens, OCR stays off, and every card must be
+# added by hand — see `make physical-check`.
+# ---------------------------------------------------------------------------
+# opencv-python>=4.9        # camera capture, detection, rectification, MJPEG
+# pytesseract>=0.3.10       # OCR of the card name / collector line
+#   + the tesseract binary:  sudo apt install tesseract-ocr  (or brew install tesseract)
+
+# Optional / heavier layers
+# torch>=2.2                # trains the card embedder (scripts/train_embedder.py);
+#                           # without it only the untrained dense descriptor is
+#                           # available and recognition accuracy is much lower
+# onnxruntime>=1.17         # runs a trained embedder without torch
+# ultralytics>=8.2          # YOLOv8 card detector training (vision/)
+# brian2>=2.5               # alternative spiking simulator backend

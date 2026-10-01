@@ -385,3 +385,97 @@ def test_ocr_availability_reports_the_real_reason(app):
     if not ok:
         assert status["ocrAvailable"] is False
         assert "tesseract" in status["ocrDetail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# name resolution: OCR text is garbled, Scryfall's autocomplete is not
+# ---------------------------------------------------------------------------
+
+def test_resolve_name_falls_back_to_autocomplete(app, monkeypatch):
+    """/cards/named?fuzzy= errors on ambiguous OCR; autocomplete never does."""
+    from physical.scryfall_cache import CardInfo
+
+    app.identifier.allow_network = True
+    calls = {"named": [], "auto": []}
+
+    def _named(name):
+        calls["named"].append(name)
+        return None                       # fuzzy lookup fails on the OCR mush
+    monkeypatch.setattr(app.identifier, "fuzzy_by_name", _named)
+    monkeypatch.setattr(app.identifier, "autocomplete_names",
+                        lambda n, limit=10: ["The Gitrog Monster", "Gitrog Raven"])
+
+    def _named_real(name):
+        if name != "The Gitrog Monster":
+            return None
+        return CardInfo(name="The Gitrog Monster", set_code="soi",
+                        collector_number="245", oracle_id="o", card_type="",
+                        base_power=6.0, base_toughness=6.0, image_uris={},
+                        fetched_at=0.0)
+    monkeypatch.setattr(app.identifier, "fuzzy_by_name", _named_real)
+
+    info = app.identifier.resolve_name("The Gitroq Monsler")
+    assert info is not None and info.name == "The Gitrog Monster"
+
+
+def test_resolve_name_uses_the_offline_cache_first(app, monkeypatch):
+    from physical.scryfall_cache import CardInfo
+
+    app.identifier.allow_network = True
+    cached = CardInfo(name="The Gitrog Monster", set_code="soi",
+                      collector_number="245", oracle_id="o", card_type="",
+                      base_power=6.0, base_toughness=6.0, image_uris={},
+                      fetched_at=0.0)
+    app.identifier.cache.put(cached)
+
+    def _boom(name):
+        raise AssertionError("a cached exact name must not hit the network")
+
+    monkeypatch.setattr(app.identifier, "fuzzy_by_name", _boom)
+    monkeypatch.setattr(app.identifier, "autocomplete_names", _boom)
+    assert app.identifier.resolve_name("The Gitrog Monster").name == \
+        "The Gitrog Monster"
+
+
+def test_autocomplete_is_offline_safe(app, monkeypatch):
+    app.identifier.allow_network = False
+    assert app.identifier.autocomplete_names("anything") == []
+
+
+def test_register_by_name_benefits_from_autocomplete(app, monkeypatch):
+    """The player's typo'd name still resolves (and lands on the table)."""
+    from physical.scryfall_cache import CardInfo
+
+    app.identifier.allow_network = True
+    monkeypatch.setattr(app.identifier, "fuzzy_by_name",
+                        lambda n: (CardInfo(name="The Gitrog Monster",
+                                            set_code="soi",
+                                            collector_number="245",
+                                            oracle_id="o", card_type="",
+                                            base_power=6.0, base_toughness=6.0,
+                                            image_uris={}, fetched_at=0.0)
+                                   if n == "The Gitrog Monster" else None))
+    monkeypatch.setattr(app.identifier, "autocomplete_names",
+                        lambda n, limit=10: ["The Gitrog Monster"])
+
+    out = app.register_by_name("the gitreg monstor")
+    assert out["status"] == "ok"
+    assert out["name"] == "The Gitrog Monster"
+
+
+def test_cache_normalises_the_set_code_on_put(tmp_path):
+    """Scryfall returns lowercase set codes; get() looks them up uppercased.
+
+    Storing raw (lowercase) and reading canonical (uppercase) used to miss,
+    which silently emptied the offline name index.
+    """
+    from physical.scryfall_cache import CardInfo, ScryfallCache
+
+    cache = ScryfallCache(tmp_path / "cache.sqlite3")
+    cache.put(CardInfo(name="The Gitrog Monster", set_code="soi",
+                       collector_number="245", oracle_id="o", card_type="",
+                       base_power=6.0, base_toughness=6.0, image_uris={},
+                       fetched_at=0.0))
+    got = cache.get("SOI", "245", use_network=False)
+    assert got is not None and got.name == "The Gitrog Monster"
+    assert got.set_code == "SOI"

@@ -317,7 +317,7 @@ function renderBoard(id, cards) {
   for (const c of cards) {
     const d = document.createElement("div");
     d.className = "card" + (c.tapped ? " tapped" : "") + (selected === c.trackingId ? " selected" : "");
-    d.innerHTML = `<div>${c.name}</div>` +
+    d.innerHTML = `<div>${esc(c.name)}</div>` +
       (c.power != null ? `<div class="pt">${c.power}/${c.toughness}</div>` : "") +
       (Object.keys(c.counters||{}).length ? `<div class="counters">${JSON.stringify(c.counters)}</div>` : "") +
       (c.summoningSick ? `<div class="sick">sick</div>` : "") +
@@ -334,7 +334,7 @@ function renderPending(pending) {
   for (const p of pending) {
     const d = document.createElement("div");
     d.className = "pendingBox";
-    d.innerHTML = `<b>vision:</b> ${p.type} <span class="muted">${JSON.stringify(p.payload)}</span> ` +
+    d.innerHTML = `<b>vision:</b> ${esc(p.type)} <span class="muted">${esc(JSON.stringify(p.payload))}</span> ` +
       `<button onclick="post('pending/confirm',{index:${p.index}})">✓</button>` +
       `<button onclick="post('pending/reject',{index:${p.index}})">✗</button>`;
     box.appendChild(d);
@@ -408,7 +408,7 @@ function showPopup(card, x, y) {
     ["token_removed", "Remove one token", {}],
     ["entered_battlefield", "Re-ETB (reset sickness)", {}],
   ];
-  p.innerHTML = `<div style="margin-bottom:4px"><b>${card.name}</b> <span class="muted">${tid}</span></div>`;
+  p.innerHTML = `<div style="margin-bottom:4px"><b>${esc(card.name)}</b> <span class="muted">${esc(tid)}</span></div>`;
   for (const [type, label, payload] of acts) {
     const b = document.createElement("button");
     b.textContent = label;

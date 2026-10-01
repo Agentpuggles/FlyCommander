@@ -1,8 +1,9 @@
 """FlyCommander physical-table mode — local server + UI.
 
 Zero new dependencies: stdlib http.server + a single-page HTML/JS UI.
-The browser owns the camera (mtgscan's getUserMedia approach); the server
-owns state, events, registration, and the fly brain.
+The *server* owns the camera (one V4L2 capture loop in physical/camera_watcher.py)
+and streams MJPEG to the browser; it also owns state, events, registration
+and the fly brain. The browser only displays the stream and posts actions.
 
 Endpoints:
   GET  /                     UI page
@@ -66,6 +67,10 @@ from physical.vision_pipeline import CardRecognizer, RecognitionConfig
 from flycommander.forge_table_bridge import ForgeTableBridge
 
 UI_PATH = Path(__file__).resolve().parent / "ui.html"
+
+# Max POST body. Camera frames arrive base64-encoded: 12 frames of 1080p JPEG
+# is a few MB, so 32 MB is generous for any real request and still bounded.
+MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
 
 class PhysicalTableApp:
@@ -334,12 +339,7 @@ class PhysicalTableApp:
         name = str(name or "").strip()
         if len(name) < 3:
             return {"status": "error", "error": "name is too short"}
-        info = None
-        local = self.identifier.local_name_match(name)
-        if local:
-            info = local[0]
-        if info is None and self.identifier.allow_network:
-            info = self.identifier.fuzzy_by_name(name)
+        info = self.identifier.resolve_name(name)
         if info is None:
             hint = "" if self.identifier.allow_network else " (offline: no cached match)"
             return {"status": "error",
@@ -610,6 +610,10 @@ class PhysicalTableApp:
                     "error": "no readable frames", "candidates": [],
                     "pipeline": "neural"}
         frame = frames[-1]
+        try:
+            frame_quality = float(score_frame_quality(frame).score)
+        except Exception:      # never fail a scan over a quality metric
+            frame_quality = 0.0
         t0 = time.time()
         scene = self.recognizer.recognize(frame)
         best = scene.best()
@@ -645,7 +649,7 @@ class PhysicalTableApp:
         rescue: dict = {}
         ocr_candidates: list = []
         if weak_visual and self.vision_config.ocr_rescue and SCAN_AVAILABLE:
-            rescue = self._ocr_rescue_scan(best)
+            rescue = self._ocr_rescue_scan(best, frame_quality=frame_quality)
             ocr_candidates = list(rescue.get("candidates") or [])
 
         # ---- one ranked list, then never offer junk ----------------------
@@ -764,7 +768,7 @@ class PhysicalTableApp:
     # ------------------------------------------------------------------
     # identification helpers (shared by the neural and OCR scan paths)
     # ------------------------------------------------------------------
-    def _ocr_rescue_scan(self, best) -> dict:
+    def _ocr_rescue_scan(self, best, frame_quality: float = 0.0) -> dict:
         """Read the card's own text and ask Scryfall who it is.
 
         Used when the visual library cannot answer (demo library, untrained
@@ -789,7 +793,7 @@ class PhysicalTableApp:
             set_code=(ocr.get("collector") or {}).get("set", ""),
             collector_number=number,
             collector_conf=float((ocr.get("collector") or {}).get("confidence") or 0.0),
-            frame_quality=float(getattr(best.rectified, "quality_score", 0.0) or 0.0))
+            frame_quality=float(frame_quality or 0.0))
         try:
             candidates = self.identifier.identify(ev)
             self.identifier.rescore(candidates, card_img)
@@ -1049,7 +1053,19 @@ class PhysicalTableServer:
                 # Read the request body EXACTLY once (do_POST does it at the
                 # top). Reading again on a keep-alive connection blocks until
                 # the client sends more bytes — a request that never answers.
-                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except (TypeError, ValueError):
+                    length = 0
+                # Bounded: /api/vision/identify and /api/register/frame accept
+                # base64 camera frames, so an uncapped body is a trivially
+                # reachable OOM on a small single-board host.
+                if length > MAX_REQUEST_BYTES:
+                    self._send_json(413, {
+                        "error": f"request body too large "
+                                 f"({length} > {MAX_REQUEST_BYTES} bytes)"})
+                    self.close_connection = True
+                    return {}
                 if not length:
                     return {}
                 try:

@@ -2,7 +2,8 @@
 """FlyCommander — physical-table mode launcher.
 
 Starts the local server (state + events + registration + fly brain) and
-serves the spectator UI with browser camera capture.
+serves the spectator UI. The server owns the camera and streams MJPEG to the
+browser; the browser never opens /dev/video itself.
 
     python scripts/physical_table.py [--port 8795] [--checkpoint ...]
 """
@@ -102,8 +103,10 @@ def main() -> int:
         print("[vision]   → with no OCR, \"Add by name\" is the way to put a "
               "card on the table")
     print(f"[physical] Magic Fly table running:  http://127.0.0.1:{args.port}")
-    print("[physical] allow the browser camera when prompted (mtgscan-style")
-    print("[physical] getUserMedia). Cards are recognised automatically;")
+    print("[physical] camera: server-owned MJPEG stream — no browser camera "
+          "permission needed")
+    print("[physical] press 📷 Scan card to identify a card, or type its name "
+          "under the video")
     print("[physical] the fly brain panel updates with every decision.")
     try:
         while True:
